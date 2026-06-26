@@ -50,7 +50,7 @@ loop-engineering/
 
 ## CogniForge
 
-**[CogniForge](./learn-loop/)** 是 Loop Engineering 在**知识学习与 mastery 验证**场景下的首个开源参考实现：
+**[CogniForge](./learn-loop/)** 是 Loop Engineering 在**知识学习与 mastery 验证**场景下的首个开源参考实现，包含自适应课程/难度、Observer 笔记分析与 Web Console：
 
 ```bash
 cd learn-loop   # 或 cogniforge（重命名后）

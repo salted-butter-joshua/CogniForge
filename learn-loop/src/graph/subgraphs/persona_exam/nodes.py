@@ -8,11 +8,15 @@ import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END
 
-from src.config import load_loop_config
+from src.config import get_settings, load_loop_config
 from src.graph.subgraphs.persona_exam.state import PersonaExamState, QuestionDraft
 from src.models.llm_factory import persona_llm
 from src.tools.json_utils import extract_json, llm_retry
-from src.tools.learning_policy import diversity_validation_errors, exam_difficulty_hint
+from src.tools.learning_policy import (
+    curriculum_page_range_label,
+    diversity_validation_errors,
+    exam_difficulty_hint,
+)
 from src.tools.rag import retrieve_chunks, search_corpus, valid_evidence_refs
 
 logger = logging.getLogger(__name__)
@@ -39,8 +43,8 @@ def rag_retrieve(state: PersonaExamState) -> dict:
     chunks = state.get("chunks_snapshot") or []
     weak = state.get("weak_topics_snapshot") or []
     style = state.get("persona_style") or ""
-    macro = state.get("macro_iter_snapshot") or 0
-    top_k = 8 + min(macro, 4) * 2
+    level = state.get("curriculum_level_snapshot") or 0
+    top_k = 8 + min(level, 4) * 2
     retrieved = retrieve_chunks(chunks, weak, style, top_k=top_k)
     return {"retrieved_chunks": retrieved}
 
@@ -90,11 +94,19 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
     llm = persona_llm()
     count = state.get("questions_target", 10)
     weak = state.get("weak_topics_snapshot") or []
-    macro = state.get("macro_iter_snapshot") or 0
-    difficulty = exam_difficulty_hint(macro)
+    difficulty = state.get("difficulty_level_snapshot") or 0
+    curriculum_level = state.get("curriculum_level_snapshot") or 0
+    diff_hint = exam_difficulty_hint(difficulty)
     weak_hint = ""
-    if weak and macro > 0:
-        weak_hint = f"本轮聚焦薄弱点：{', '.join(weak)}。至少一半题目必须围绕这些主题。"
+    if weak and difficulty >= 1:
+        weak_hint = (
+            f"本轮聚焦薄弱点：{', '.join(weak)}。"
+            f"约一半题目围绕这些主题，难度等级 {difficulty}。"
+        )
+    range_hint = ""
+    if curriculum_level >= 0:
+        ppr = get_settings().curriculum_pages_per_round
+        range_hint = f"出题范围仅限：{curriculum_page_range_label(curriculum_level, ppr)}。"
 
     rag_ctx = _format_chunks_for_prompt(state.get("retrieved_chunks") or [])
     search_ctx = json.dumps(state.get("search_results") or [], ensure_ascii=False)[:4000]
@@ -105,8 +117,8 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
 
     prompt = f"""你扮演「{state.get('persona_name')}」（{state.get('persona_style')}）。
 {state.get('persona_prompt_hint')}
-{macro and f"当前宏观迭代：{macro}" or ""}
-{difficulty}
+{range_hint}
+{diff_hint}
 {weak_hint}
 {error_hint}
 
@@ -169,13 +181,13 @@ def validate_questions(state: PersonaExamState) -> dict:
     chunks = state.get("chunks_snapshot") or []
     drafts = state.get("draft_questions") or []
     target = state.get("questions_target", 10)
-    macro = state.get("macro_iter_snapshot") or 0
+    difficulty = state.get("difficulty_level_snapshot") or 0
     errors: list[str] = []
 
     if len(drafts) < max(1, target // 2):
         errors.append(f"题目数量不足：{len(drafts)}/{target}")
 
-    min_unique = 3 if macro <= 0 else (4 if macro == 1 else 5)
+    min_unique = 3 + min(difficulty, 2)
     errors.extend(diversity_validation_errors(drafts, min_unique_refs=min_unique))
 
     seen_questions: set[str] = set()

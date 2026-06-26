@@ -32,7 +32,12 @@ from src.tools.json_utils import extract_json, llm_content_to_str, llm_retry
 
 from src.logging_config import get_loop_logger
 
-from src.tools.learning_policy import curriculum_chunks, curriculum_delta_chunks, format_mentor_feedback
+from src.tools.learning_policy import (
+    build_study_context,
+    curriculum_chunks,
+    curriculum_delta_chunks,
+    curriculum_page_range_label,
+)
 
 from src.tools.web_fetch import fetch_and_chunk_urls, material_context
 
@@ -169,16 +174,19 @@ def generate_material(state: LearnLoopState) -> dict:
     settings = get_settings()
 
     macro = state.get("macro_iter", 0)
+    curriculum_level = state.get("curriculum_level", 0)
 
-    unlocked = curriculum_chunks(chunks, macro, settings.curriculum_pages_per_round)
+    unlocked = curriculum_chunks(chunks, curriculum_level, settings.curriculum_pages_per_round)
 
     context = material_context(unlocked, max_chars=settings.material_context_max_chars)
 
     logger.info(
 
-        "generate_material macro=%s unlocked_chunks=%d/%d pages_round=%d",
+        "generate_material macro=%s curriculum_level=%s unlocked_chunks=%d/%d pages_round=%d",
 
         macro,
+
+        curriculum_level,
 
         len(unlocked),
 
@@ -232,35 +240,22 @@ def _study_llm(
 
     weak_topics: list[str],
 
-    observations: list,
-
     *,
 
     notes_max_chars: int,
 
     macro_iter: int,
 
+    curriculum_level: int,
+
+    pages_per_round: int,
+
 ) -> str:
 
     llm = student_llm()
 
-    obs_text = ""
-
-    if observations:
-
-        last = observations[-1]
-
-        mentor = format_mentor_feedback(last)
-
-        if mentor:
-
-            obs_text = f"""
-
-学习导师上轮反馈（请认真采纳，修正不良习惯与错误想法，并按规划调整本轮学习）：
-
-{mentor}"""
-
     weak_text = ", ".join(weak_topics) if weak_topics else "无"
+    range_label = curriculum_page_range_label(curriculum_level, pages_per_round)
 
     prompt = f"""你是普通个人学习者 A（非专家）。请学习以下资料并输出学习笔记。
 
@@ -278,15 +273,15 @@ def _study_llm(
 
 - 当前为第 {macro_iter + 1} 轮学习，笔记是在上轮基础上增量整理
 
+- {range_label}；只学本窗口内容，不要编造未提供章节
+
 
 
 薄弱点（需重点回顾）：{weak_text}
 
-{obs_text}
 
 
-
-学习资料（本阶段已解锁内容）：
+学习资料（与课程解锁窗口对齐）：
 
 {material}
 
@@ -318,31 +313,37 @@ def _study_llm(
 
 def student_study(state: LearnLoopState) -> dict:
 
-    material = state.get("study_material") or ""
-
     weak = state.get("weak_topics") or []
-
-    observations = state.get("observations") or []
 
     settings = get_settings()
 
     macro = state.get("macro_iter", 0)
+    curriculum_level = state.get("curriculum_level", 0)
+    raw_chunks = state.get("raw_chunks") or []
 
-    material_excerpt = material[: settings.student_material_study_max_chars]
+    study_ctx = build_study_context(
+        raw_chunks=raw_chunks,
+        study_material=state.get("study_material") or "",
+        curriculum_level=curriculum_level,
+        pages_per_round=settings.curriculum_pages_per_round,
+        max_chars=settings.student_material_study_max_chars,
+    )
 
     try:
 
         notes = _study_llm(
 
-            material_excerpt,
+            study_ctx,
 
             weak,
-
-            observations,
 
             notes_max_chars=settings.student_notes_study_max_chars,
 
             macro_iter=macro,
+
+            curriculum_level=curriculum_level,
+
+            pages_per_round=settings.curriculum_pages_per_round,
 
         )
 
@@ -444,11 +445,11 @@ def _refine_material_llm(
 
     prompt = f"""根据测验薄弱点，在原有学习资料基础上：
 
-1. 补充「薄弱点强化章节」
+1. 补充「薄弱点强化章节」（始终执行）
 
-2. 合并本阶段新解锁章节要点（若有）
+2. 若下方提供了新解锁章节原文，则合并其要点；若无新原文，不要编造新章节
 
-只补充有依据的内容，不可臆造。当前将进入第 {macro_iter + 2} 学习阶段。
+只补充有依据的内容，不可臆造。当前课程窗口：{curriculum_page_range_label(curriculum_level, settings.curriculum_pages_per_round)}。
 
 
 
@@ -490,10 +491,16 @@ def refine_material(state: LearnLoopState) -> dict:
 
     raw_chunks = state.get("raw_chunks") or []
 
-    delta = curriculum_delta_chunks(
+    curriculum_level = state.get("curriculum_level", 0)
 
-        raw_chunks, macro, settings.curriculum_pages_per_round
+    advanced = state.get("curriculum_advanced", False)
 
+    delta = (
+        curriculum_delta_chunks(
+            raw_chunks, curriculum_level - 1, settings.curriculum_pages_per_round
+        )
+        if advanced and curriculum_level > 0
+        else []
     )
 
     new_context = material_context(delta, max_chars=settings.material_context_max_chars // 2)
@@ -514,11 +521,13 @@ def refine_material(state: LearnLoopState) -> dict:
 
         logger.info(
 
-            "refine_material macro=%s->%s new_chunks=%d",
+            "refine_material macro=%s curriculum_level=%s advanced=%s new_chunks=%d",
 
             macro,
 
-            macro + 1,
+            curriculum_level,
+
+            advanced,
 
             len(delta),
 
@@ -529,6 +538,8 @@ def refine_material(state: LearnLoopState) -> dict:
             "study_material": updated,
 
             "macro_iter": 1,
+
+            "curriculum_advanced": False,
 
             "phase": "student_study",
 

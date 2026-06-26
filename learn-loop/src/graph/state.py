@@ -34,14 +34,14 @@ class ExamQA(TypedDict, total=False):
 
 
 class ObservationRecord(TypedDict, total=False):
-    """Learning mentor feedback after each exam round."""
+    """Observer analysis of student study notes (internal report, not fed to student)."""
 
     macro_iter: int
-    performance_diagnosis: str
-    habit_corrections: str
-    methodology_advice: str
-    study_plan: str
-    mentor_summary: str
+    learning_patterns: str
+    knowledge_framework: str
+    note_style_observations: str
+    recurring_blind_spots: str
+    observer_summary: str
 
 
 def merge_qa_lists(left: list, right: list) -> list:
@@ -60,6 +60,9 @@ class LearnLoopState(TypedDict, total=False):
     study_notes: str
 
     macro_iter: Annotated[int, operator.add]
+    curriculum_level: int
+    difficulty_level: int
+    curriculum_advanced: bool
     max_macro_iter: int
     min_macro_iter: int
     consecutive_pass_rounds: int

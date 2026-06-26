@@ -6,6 +6,9 @@
 
 # Runtime artifacts
 learn-loop/outputs/
+**/outputs/
+learn-loop/web/node_modules/
+learn-loop/web/dist/
 **/__pycache__/
 **/*.pyc
 **/.pytest_cache/

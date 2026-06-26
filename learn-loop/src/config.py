@@ -75,6 +75,15 @@ class Settings(BaseSettings):
         default=24000, alias="MATERIAL_CONTEXT_MAX_CHARS"
     )
     curriculum_pages_per_round: int = Field(default=12, alias="CURRICULUM_PAGES_PER_ROUND")
+    curriculum_advance_accuracy: float = Field(
+        default=0.85, alias="CURRICULUM_ADVANCE_ACCURACY"
+    )
+    difficulty_advance_accuracy: float = Field(
+        default=0.90, alias="DIFFICULTY_ADVANCE_ACCURACY"
+    )
+    difficulty_retreat_accuracy: float = Field(
+        default=0.50, alias="DIFFICULTY_RETREAT_ACCURACY"
+    )
     judge_evidence_only: bool = Field(default=True, alias="JUDGE_EVIDENCE_ONLY")
     judge_evidence_max_chars: int = Field(default=12000, alias="JUDGE_EVIDENCE_MAX_CHARS")
     evidence_cap_score: float = Field(default=0.78, alias="EVIDENCE_CAP_SCORE")

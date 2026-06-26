@@ -36,11 +36,13 @@ from src.tools.learning_policy import (
 
     apply_evidence_cap,
 
-    build_observer_qa_payload,
+    adjust_difficulty_level,
 
     format_batch_evidence_context,
 
     format_evidence_context,
+
+    maybe_advance_curriculum_level,
 
     weighted_accuracy,
 
@@ -350,7 +352,21 @@ def judge_score(state: LearnLoopState) -> dict:
 
         weak_topics = [t for t, _ in weak_counter.most_common(10)]
 
-
+        old_diff = int(state.get("difficulty_level", 0) or 0)
+        old_curr = int(state.get("curriculum_level", 0) or 0)
+        new_diff = adjust_difficulty_level(
+            old_diff,
+            accuracy,
+            advance_threshold=settings.difficulty_advance_accuracy,
+            retreat_threshold=settings.difficulty_retreat_accuracy,
+        )
+        new_curr, curr_advanced = maybe_advance_curriculum_level(
+            old_curr,
+            accuracy,
+            chunks,
+            settings.curriculum_pages_per_round,
+            advance_threshold=settings.curriculum_advance_accuracy,
+        )
 
         history = list(state.get("accuracy_history") or [])
 
@@ -371,6 +387,12 @@ def judge_score(state: LearnLoopState) -> dict:
             f"- Weighted accuracy: {accuracy:.2%} (used for loop)",
 
             f"- Threshold: {CORRECT_THRESHOLD:.0%}",
+
+            f"- Difficulty level: {old_diff} -> {new_diff}",
+
+            f"- Curriculum level: {old_curr} -> {new_curr}"
+
+            + (" (advanced)" if curr_advanced else " (held)"),
 
             f"- Weak topics: {', '.join(weak_topics) or 'none'}",
 
@@ -440,6 +462,12 @@ def judge_score(state: LearnLoopState) -> dict:
 
             "weak_topics": weak_topics,
 
+            "difficulty_level": new_diff,
+
+            "curriculum_level": new_curr,
+
+            "curriculum_advanced": curr_advanced,
+
             "judge_report": report,
 
             "phase": "observer_analyze",
@@ -466,46 +494,47 @@ def _observer_analyze_llm(
     accuracy_history: list[float],
 ) -> dict:
     llm = observer_llm()
-    qa_payload = build_observer_qa_payload(qa_list)
+    wrong_count = sum(1 for q in qa_list if not q.get("is_correct"))
     history_text = ", ".join(f"{h:.0%}" for h in (accuracy_history or [])[-5:]) or "无"
     weak_text = ", ".join(weak_topics) if weak_topics else "无"
 
-    prompt = f"""你是学习导师 C，同时承担学习规划者与学习方法论教练的角色。
-你的任务不是旁观记录，而是基于学生 A 本轮答题表现，给出可执行的指导：
-- 诊断知识掌握与答题问题
-- 指出并纠正不良学习习惯、错误认知或低效做法
-- 提供具体、可操作的学习方法论建议
-- 制定下一轮学习规划（优先级、时间分配、复习策略）
+    prompt = f"""你是独立学习观察者（角色 C），不直接指导学生。
+你的任务是阅读学生 A 的本轮学习笔记，总结其学习规律、笔记习惯与知识建构方式，形成观察报告。
+报告仅供系统复盘与研究者参考，不会交给学生阅读或影响其下一轮学习。
+
+观察重点：
+- 笔记的组织方式与信息取舍（详略、抄录 vs 概括、是否口语化）
+- 重复出现的学习模式（如只记结论不记原因、术语堆砌、回避难点）
+- 从笔记推断的知识框架是否完整、层级是否清晰
+- 与薄弱主题对照，笔记中是否反复遗漏或表述模糊之处
+- 若有历史轮次信息，可指出笔记风格的变化趋势
 
 原则：
-- 建议要具体，避免空泛鼓励
-- 区分「知识缺口」与「方法/习惯问题」
-- 对重复出现的错误模式要明确指出并给出替代做法
-- 规划需与薄弱主题和当前迭代阶段匹配
+- 以学习笔记为主要分析对象；答题统计仅作辅助对照
+- 区分「观察到的事实」与「推测」，证据不足时明确说明
+- 描述现象与规律，不对学生发出指令性建议或学习规划
 
 当前宏观迭代：{macro_iter}
 本轮加权正确率：{accuracy:.2%}
 历史正确率（近几轮）：{history_text}
-薄弱主题：{weak_text}
+薄弱主题（Judge 归纳，辅助对照）：{weak_text}
+答题统计（辅助）：共 {len(qa_list)} 题，错题 {wrong_count} 道
 
-学生笔记（节选，用于判断学习方式和笔记质量）：
-{study_notes[:3500]}
-
-作答数据（优先包含错题及 Judge 评语）：
-{json.dumps(qa_payload, ensure_ascii=False, indent=2)}
+学生本轮学习笔记（主要分析对象）：
+{study_notes[:6000]}
 
 输出 JSON：
 {{
-  "performance_diagnosis": "基于答题情况的诊断（Markdown，含按题型/主题的问题归纳）",
-  "habit_corrections": "需纠正的学习习惯或错误想法（Markdown，逐条：问题→为何有害→应如何改）",
-  "methodology_advice": "学习方法论建议（Markdown，如主动回忆、费曼、间隔复习、错题复盘等，结合本轮表现选型）",
-  "study_plan": "下一轮学习规划（Markdown，含优先级排序、建议步骤、自测方式）",
-  "mentor_summary": "导师一句话总结（50字内，直接点出最该改的一件事）"
+  "learning_patterns": "从笔记中总结的学习规律与行为模式（Markdown）",
+  "knowledge_framework": "从笔记结构推断的知识框架掌握情况（Markdown）",
+  "note_style_observations": "笔记风格、习惯与信息处理方式（Markdown）",
+  "recurring_blind_spots": "反复未覆盖、表述模糊或与薄弱主题相关的盲区（Markdown）",
+  "observer_summary": "本轮观察摘要（100字内，供研究者快速浏览）"
 }}"""
     resp = llm.invoke(
         [
             SystemMessage(
-                content="你是严厉但支持学生的学习导师。聚焦可改变的习惯与方法，不说空话。"
+                content="你是客观的学习观察者。聚焦笔记中的学习规律与发现，不给学生提建议。"
             ),
             HumanMessage(content=prompt),
         ]
@@ -513,15 +542,16 @@ def _observer_analyze_llm(
     return extract_json(resp.content)
 
 
-def _build_mentor_report(record: ObservationRecord, macro: int) -> str:
+def _build_observer_report(record: ObservationRecord, macro: int) -> str:
     return "\n\n".join(
         [
-            f"# 学习导师反馈 — 第 {macro} 轮",
-            "## 导师寄语\n" + record.get("mentor_summary", ""),
-            "## 答题诊断\n" + record.get("performance_diagnosis", ""),
-            "## 习惯与认知纠正\n" + record.get("habit_corrections", ""),
-            "## 学习方法建议\n" + record.get("methodology_advice", ""),
-            "## 下轮学习规划\n" + record.get("study_plan", ""),
+            f"# 学习观察报告 — 第 {macro} 轮",
+            "> 本报告仅供系统复盘，不传入学生学习流程。",
+            "## 观察摘要\n" + record.get("observer_summary", ""),
+            "## 学习规律\n" + record.get("learning_patterns", ""),
+            "## 知识框架观察\n" + record.get("knowledge_framework", ""),
+            "## 笔记风格与习惯\n" + record.get("note_style_observations", ""),
+            "## 反复盲区\n" + record.get("recurring_blind_spots", ""),
         ]
     )
 
@@ -545,14 +575,14 @@ def observer_analyze(state: LearnLoopState) -> dict:
         )
         record = ObservationRecord(
             macro_iter=macro,
-            performance_diagnosis=data.get("performance_diagnosis", ""),
-            habit_corrections=data.get("habit_corrections", ""),
-            methodology_advice=data.get("methodology_advice", ""),
-            study_plan=data.get("study_plan", ""),
-            mentor_summary=data.get("mentor_summary", ""),
+            learning_patterns=data.get("learning_patterns", ""),
+            knowledge_framework=data.get("knowledge_framework", ""),
+            note_style_observations=data.get("note_style_observations", ""),
+            recurring_blind_spots=data.get("recurring_blind_spots", ""),
+            observer_summary=data.get("observer_summary", ""),
         )
 
-        report = _build_mentor_report(record, macro)
+        report = _build_observer_report(record, macro)
 
         task_id = state.get("task_id", "default")
         out = ensure_output_dir(task_id)

@@ -51,10 +51,10 @@ def _url_order(chunks: list[dict]) -> list[str]:
 
 def curriculum_chunks(
     chunks: list[dict],
-    macro_iter: int,
+    curriculum_level: int,
     pages_per_round: int,
 ) -> list[dict]:
-    """Progressively unlock handbook pages across macro iterations."""
+    """Cumulative unlock: levels 0..N map to pages 1..(level+1)*pages_per_round."""
     filtered = filter_content_chunks(chunks)
     if not filtered or pages_per_round <= 0:
         return filtered
@@ -63,7 +63,8 @@ def curriculum_chunks(
     for c in filtered:
         by_url.setdefault(c.get("url", ""), []).append(c)
 
-    unlocked_count = max(1, pages_per_round * (macro_iter + 1))
+    level = max(0, curriculum_level)
+    unlocked_count = max(1, pages_per_round * (level + 1))
     urls = _url_order(filtered)[:unlocked_count]
 
     result: list[dict] = []
@@ -72,15 +73,103 @@ def curriculum_chunks(
     return result or filtered[: max(1, pages_per_round * 3)]
 
 
+def max_curriculum_level(chunks: list[dict], pages_per_round: int) -> int:
+    """Highest curriculum level before all handbook pages are unlocked."""
+    urls = _url_order(filter_content_chunks(chunks))
+    if not urls or pages_per_round <= 0:
+        return 0
+    if len(urls) <= pages_per_round:
+        return 0
+    return (len(urls) - 1) // pages_per_round
+
+
 def curriculum_delta_chunks(
     chunks: list[dict],
-    macro_iter: int,
+    curriculum_level: int,
     pages_per_round: int,
 ) -> list[dict]:
-    """Chunks from pages newly unlocked at macro_iter + 1."""
-    prev_urls = {c.get("url") for c in curriculum_chunks(chunks, macro_iter, pages_per_round)}
-    nxt = curriculum_chunks(chunks, macro_iter + 1, pages_per_round)
+    """Chunks from pages newly unlocked when advancing to curriculum_level + 1."""
+    prev_urls = {
+        c.get("url") for c in curriculum_chunks(chunks, curriculum_level, pages_per_round)
+    }
+    nxt = curriculum_chunks(chunks, curriculum_level + 1, pages_per_round)
     return [c for c in nxt if c.get("url") not in prev_urls]
+
+
+def curriculum_page_range_label(curriculum_level: int, pages_per_round: int) -> str:
+    """Human-readable page window for prompts."""
+    level = max(0, curriculum_level)
+    start = 1
+    end = pages_per_round * (level + 1)
+    if level == 0:
+        return f"第 {start}–{end} 页（首段课程）"
+    prev_end = pages_per_round * level
+    return f"第 {start}–{prev_end} 页（已学）+ 第 {prev_end + 1}–{end} 页（本轮新解锁）"
+
+
+def adjust_difficulty_level(
+    current: int,
+    accuracy: float,
+    *,
+    advance_threshold: float = 0.90,
+    retreat_threshold: float = 0.50,
+    max_level: int = 4,
+) -> int:
+    """Raise difficulty only after strong accuracy; lower when struggling."""
+    level = max(0, min(max_level, int(current)))
+    if accuracy >= advance_threshold:
+        return min(level + 1, max_level)
+    if accuracy < retreat_threshold:
+        return max(level - 1, 0)
+    return level
+
+
+def maybe_advance_curriculum_level(
+    current: int,
+    accuracy: float,
+    chunks: list[dict],
+    pages_per_round: int,
+    *,
+    advance_threshold: float = 0.85,
+) -> tuple[int, bool]:
+    """Advance cumulative page window only when accuracy meets the bar."""
+    level = max(0, int(current))
+    cap = max_curriculum_level(chunks, pages_per_round)
+    if level >= cap:
+        return level, False
+    if accuracy < advance_threshold:
+        return level, False
+    return min(level + 1, cap), True
+
+
+def build_study_context(
+    *,
+    raw_chunks: list[dict],
+    study_material: str,
+    curriculum_level: int,
+    pages_per_round: int,
+    max_chars: int,
+) -> str:
+    """Align student-readable content with the cumulative unlocked curriculum window."""
+    from src.tools.web_fetch import material_context
+
+    unlocked = curriculum_chunks(raw_chunks, curriculum_level, pages_per_round)
+    range_label = curriculum_page_range_label(curriculum_level, pages_per_round)
+    chunk_budget = max(max_chars * 2 // 3, 1000)
+    chunk_text = material_context(unlocked, max_chars=chunk_budget)
+    material_budget = max(max_chars - len(chunk_text) - 200, 500)
+    material_excerpt = (study_material or "").strip()[:material_budget]
+
+    parts: list[str] = [
+        f"【课程范围】{range_label}。请只学习此范围内内容，不要超前。",
+    ]
+    if material_excerpt:
+        parts.append(f"## 已整理学习资料（与上述范围对应）\n{material_excerpt}")
+    parts.append(f"## 本阶段已解锁原文\n{chunk_text}")
+    text = "\n\n".join(parts)
+    if len(text) > max_chars:
+        return text[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
+    return text
 
 
 def chunks_by_ids(chunks: list[dict], ids: list[str]) -> list[dict]:
@@ -127,21 +216,32 @@ def format_batch_evidence_context(
     return format_evidence_context(chunks, ids, max_chars=max_chars)
 
 
-def exam_difficulty_hint(macro_iter: int) -> str:
-    if macro_iter <= 0:
-        return (
-            "难度分布：40% 基础回忆，40% 理解说明，20% 简单应用。"
-            "禁止出需要跨多章综合的压轴题。"
-        )
-    if macro_iter == 1:
-        return (
-            "难度分布：25% 回忆，35% 理解，40% 场景应用/排错。"
-            "至少 3 道题要求结合两个以上 evidence chunk。"
-        )
-    return (
-        "难度分布：15% 回忆，30% 理解，55% 综合应用、边界条件、排错推演。"
-        "至少 5 道题必须串联多个 evidence_refs；禁止纯术语定义题。"
-    )
+def exam_difficulty_hint(difficulty_level: int) -> str:
+    """Adaptive exam difficulty (0=easiest .. 4=hardest), not tied to macro round."""
+    level = max(0, min(4, int(difficulty_level)))
+    hints = {
+        0: (
+            "难度：入门。60% 基础回忆，30% 理解说明，10% 简单应用。"
+            "题目以单个 evidence chunk 为主，禁止跨章综合。"
+        ),
+        1: (
+            "难度：基础。50% 回忆，35% 理解，15% 简单应用。"
+            "仍以单 chunk 为主，最多 1 题可引用第二个 chunk。"
+        ),
+        2: (
+            "难度：进阶。40% 回忆，35% 理解，25% 场景应用。"
+            "约 2 道题需结合两个 evidence chunk。"
+        ),
+        3: (
+            "难度：挑战。30% 回忆，35% 理解，35% 应用/排错。"
+            "至少 3 道题跨多个 evidence chunk。"
+        ),
+        4: (
+            "难度：综合。20% 回忆，30% 理解，50% 综合应用与边界条件。"
+            "至少 4 道题必须串联多个 evidence_refs。"
+        ),
+    }
+    return hints[level]
 
 
 def diversity_validation_errors(
@@ -202,45 +302,32 @@ def apply_evidence_cap(
     return score, ""
 
 
-def format_mentor_feedback(obs: dict) -> str:
-    """Render mentor record for student study prompt (supports legacy fields)."""
+def format_observer_report(obs: dict) -> str:
+    """Render observer record as Markdown (archival / human review only)."""
     if not obs:
         return ""
 
     sections: list[str] = []
-    summary = obs.get("mentor_summary", "")
+    summary = obs.get("observer_summary", "")
     if summary:
-        sections.append(f"**导师寄语**：{summary}")
+        sections.append(f"**观察摘要**：{summary}")
 
     mapping = [
-        ("performance_diagnosis", "答题诊断"),
-        ("habit_corrections", "需纠正的习惯/错误想法"),
-        ("methodology_advice", "学习方法建议"),
-        ("study_plan", "下轮学习规划"),
+        ("learning_patterns", "学习规律"),
+        ("knowledge_framework", "知识框架观察"),
+        ("note_style_observations", "笔记风格与习惯"),
+        ("recurring_blind_spots", "反复盲区"),
     ]
     for key, title in mapping:
         text = obs.get(key, "")
         if text:
             sections.append(f"**{title}**\n{text}")
 
-    if sections:
-        return "\n\n".join(sections)
-
-    legacy = [
-        ("learning_patterns", "学习规律"),
-        ("knowledge_framework", "知识框架"),
-        ("answer_style_notes", "答题风格"),
-        ("improvement_suggestions", "改进建议"),
-    ]
-    for key, title in legacy:
-        text = obs.get(key, "")
-        if text:
-            sections.append(f"**{title}**\n{text}")
     return "\n\n".join(sections)
 
 
 def build_observer_qa_payload(qa_list: list[dict], *, max_items: int = 40) -> dict:
-    """Prioritize wrong answers and include judge reasons for mentor diagnosis."""
+    """Summarize exam outcomes for optional observer context (not primary input)."""
     wrong = [q for q in qa_list if not q.get("is_correct")]
     correct = [q for q in qa_list if q.get("is_correct")]
     sample = (wrong[: max_items // 2 + 10] + correct[: max_items // 2])[:max_items]

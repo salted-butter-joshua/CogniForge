@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 # Human-readable step names (parent graph)
@@ -20,7 +23,7 @@ STEP_LABELS: dict[str, str] = {
     "aggregate_qa": "汇总 Q&A",
     "judge_score": "Judge 评分",
     "student_progress": "答题进度",
-    "observer_analyze": "学习导师反馈",
+    "observer_analyze": "观察者分析",
     "refine_material": "补强资料",
     "finalize": "结束",
 }
@@ -47,6 +50,36 @@ _QUIET_LOGGERS = (
 
 # Nodes that return macro_iter as +N delta (state reducer = operator.add)
 _MACRO_DELTA_STEPS = frozenset({"refine_material"})
+
+_step_starts: dict[tuple, float] = {}
+_step_hook: Callable[[dict[str, Any]], None] | None = None
+_hook_lock = threading.Lock()
+
+
+def set_step_event_hook(fn: Callable[[dict[str, Any]], None] | None) -> None:
+    """Register callback for step start/done events (used by web console SSE)."""
+    global _step_hook
+    with _hook_lock:
+        _step_hook = fn
+
+
+def _step_key(state: dict[str, Any], step: str) -> tuple:
+    return (
+        state.get("task_id", "-"),
+        int(state.get("macro_iter", 0) or 0),
+        int(state.get("exam_batch_index", 0) or 0),
+        step,
+    )
+
+
+def _emit_step_event(payload: dict[str, Any]) -> None:
+    with _hook_lock:
+        hook = _step_hook
+    if hook:
+        try:
+            hook(payload)
+        except Exception:
+            pass
 
 
 def _unwrap_value(value: Any) -> Any:
@@ -201,6 +234,7 @@ def _build_detail(state: dict[str, Any], step: str, *, result: dict[str, Any] | 
 
 def log_step_start(state: dict[str, Any], step: str, **extra: Any) -> None:
     c = _ctx(state)
+    _step_starts[_step_key(state, step)] = time.perf_counter()
     detail = _build_detail(state, step)
     if extra:
         extra_s = " ".join(f"{k}={v}" for k, v in extra.items())
@@ -215,6 +249,30 @@ def log_step_start(state: dict[str, Any], step: str, **extra: Any) -> None:
         detail=detail,
     )
     get_loop_logger().info(line)
+    _emit_step_event(
+        {
+            "type": "step_start",
+            "step": step,
+            "step_label": STEP_LABELS.get(step, step),
+            "macro_iter": c["macro"],
+            "batch": c["batch"],
+            "ts": time.time(),
+        }
+    )
+
+
+def _format_duration(ms: int) -> str:
+    if ms < 1000:
+        return f"{ms}ms"
+    sec = ms / 1000
+    if sec < 60:
+        return f"{sec:.1f}s"
+    minutes = int(sec // 60)
+    rem = sec % 60
+    if minutes < 60:
+        return f"{minutes}m{rem:02.0f}s"
+    hours = minutes // 60
+    return f"{hours}h{minutes % 60:02d}m"
 
 
 def log_step_done(state: dict[str, Any], step: str, result: dict[str, Any], **extra: Any) -> None:
@@ -223,7 +281,15 @@ def log_step_done(state: dict[str, Any], step: str, result: dict[str, Any], **ex
     if outcome == "running" or not outcome:
         outcome = "ok"
 
+    key = _step_key(state, step)
+    started = _step_starts.pop(key, None)
+    duration_ms: int | None = None
+    if started is not None:
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+
     detail = _build_detail(state, step, result=result)
+    if duration_ms is not None:
+        detail = f"duration={_format_duration(duration_ms)} {detail}".strip()
     if extra:
         extra_s = " ".join(f"{k}={v}" for k, v in extra.items())
         detail = f"{detail} {extra_s}".strip()
@@ -246,6 +312,21 @@ def log_step_done(state: dict[str, Any], step: str, result: dict[str, Any], **ex
         logger.error(line)
     else:
         logger.info(line)
+
+    if duration_ms is not None:
+        _emit_step_event(
+            {
+                "type": "step_timing",
+                "step": step,
+                "step_label": STEP_LABELS.get(step, step),
+                "duration_ms": duration_ms,
+                "duration_label": _format_duration(duration_ms),
+                "macro_iter": c["macro"],
+                "batch": batch,
+                "outcome": outcome,
+                "ts": time.time(),
+            }
+        )
 
 
 def log_step_warn(state: dict[str, Any], step: str, message: str, **extra: Any) -> None:

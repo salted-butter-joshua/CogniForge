@@ -34,6 +34,12 @@ def reset_cancel_state() -> None:
     _force_exit = False
 
 
+def request_cancel() -> None:
+    """Cooperative cancel (API / UI stop button)."""
+    global _cancel_requested
+    _cancel_requested = True
+
+
 def is_cancel_requested() -> bool:
     return _cancel_requested
 

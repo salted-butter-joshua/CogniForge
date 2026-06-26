@@ -28,6 +28,8 @@ class PersonaExamState(TypedDict, total=False):
     chunks_snapshot: list[dict]
     weak_topics_snapshot: list[str]
     macro_iter_snapshot: int
+    difficulty_level_snapshot: int
+    curriculum_level_snapshot: int
     exam_batch_index_snapshot: int
     questions_target: int
 
