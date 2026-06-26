@@ -1,0 +1,22 @@
+flowchart LR
+    subgraph INNER["子图内循环"]
+        direction TB
+        L1["出题"]
+        L2["证据自检"]
+        L1 --> L2
+        L2 -->|失败| L1
+    end
+
+    subgraph MACRO["父图 Macro Loop"]
+        direction TB
+        M1["学习"]
+        M2["5 路出题子图"]
+        M3["A 作答"]
+        M4["Judge"]
+        M5["观察者"]
+        M6["补强资料"]
+        M1 --> M2 --> M3 --> M4 --> M5
+        M5 -->|未达标| M6 --> M1
+    end
+
+    INNER --> M2

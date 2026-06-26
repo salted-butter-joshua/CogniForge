@@ -1,0 +1,45 @@
+# CogniForge — Loop Engineering reference (Docker Compose)
+#
+#   cp .env.example .env
+#   docker compose up --build
+#
+#   docker compose run --rm cogniforge \
+#     --urls https://example.com --goal "…" --task-id demo-001
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cogniforge-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  cogniforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cogniforge-app
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      OUTPUT_DIR: /app/outputs
+    volumes:
+      - ./outputs:/app/outputs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  redis_data:
