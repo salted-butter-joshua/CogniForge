@@ -118,7 +118,6 @@ Visual control plane: **URL input · parameter presets · live SSE logs · step 
 ### Local development (recommended)
 
 ```bash
-cd learn-loop
 pip install -r requirements.txt
 cp .env.example .env   # set at least one LLM API key
 
@@ -173,7 +172,7 @@ Run metadata is stored under `outputs/.registry/` (gitignored).
 
 ```bash
 git clone <repository-url>
-cd loop-engineering/learn-loop
+cd <repository-name>
 
 cp .env.example .env
 # edit .env — add your API key(s); never commit this file
@@ -193,7 +192,6 @@ docker compose run --rm cogniforge \
 ### Local CLI
 
 ```bash
-cd learn-loop
 python -m venv .venv
 
 # Linux / macOS
@@ -342,7 +340,7 @@ flowchart TD
 ## Project layout
 
 ```
-learn-loop/
+.
 ├── config/           # personas, rubric, models, settings.yaml
 ├── src/
 │   ├── main.py       # CLI entry
