@@ -1,0 +1,17 @@
+flowchart TB
+    subgraph TOP["上下文隔离需求 高"]
+        direction LR
+        A["真 Subagent<br/>tool 委派，只回摘要"]
+        B["Subgraph + 私有 state<br/>半隔离（出题者推荐）"]
+    end
+
+    subgraph BOTTOM["上下文隔离需求 低"]
+        direction LR
+        C["单节点 / 线程池<br/>当前 exam.py"]
+        D["Subgraph + 共享 state<br/>流程复用"]
+    end
+
+    LEFT["结构简单"] ~~~ RIGHT["结构复杂"]
+
+    style B fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style C fill:#ffe0b2,stroke:#ef6c00

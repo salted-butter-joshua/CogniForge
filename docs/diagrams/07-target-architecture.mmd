@@ -1,0 +1,30 @@
+flowchart TB
+    FETCH["fetch 网页"] --> MAT["generate_material"]
+    MAT --> STUDY["student_study"]
+
+    STUDY --> PREP["prepare_exam"]
+    PREP --> FAN["fan-out × 5"]
+
+    FAN --> P1["PersonaExamSubgraph P1"]
+    FAN --> P2["PersonaExamSubgraph P2"]
+    FAN --> P3["PersonaExamSubgraph P3"]
+    FAN --> P4["PersonaExamSubgraph P4"]
+    FAN --> P5["PersonaExamSubgraph P5"]
+
+    P1 --> MERGE["merge 50 题"]
+    P2 --> MERGE
+    P3 --> MERGE
+    P4 --> MERGE
+    P5 --> MERGE
+
+    MERGE --> ANS["student_answer_batch"]
+    ANS --> JUDGE["judge_batch"]
+    JUDGE --> OBS["observer"]
+    OBS --> ROUTE{"macro_router"}
+
+    ROUTE -->|达标 / 上限 / 停滞| ENDNODE(["结束"])
+    ROUTE -->|未达标| REFINE["refine_material"]
+    REFINE --> STUDY
+
+    style FAN fill:#fff9c4,stroke:#f9a825
+    style MERGE fill:#c8e6c9,stroke:#2e7d32

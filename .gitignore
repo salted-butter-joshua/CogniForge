@@ -1,23 +1,10 @@
-# Secrets
 .env
-**/.env
-!.env.example
-!.env.local.example
-
-# Runtime artifacts
-learn-loop/outputs/
-**/outputs/
-learn-loop/web/node_modules/
-learn-loop/web/dist/
-**/__pycache__/
-**/*.pyc
-**/.pytest_cache/
+.env.local
+outputs/
+web/node_modules/
+web/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
 .venv/
 venv/
-
-# IDE / OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
-Thumbs.db

@@ -1,0 +1,24 @@
+flowchart TB
+    subgraph SG["Subgraph — 管流程"]
+        SG_IN["输入 state 映射"]
+        SG_NODES["节点 A → B → C → 回环"]
+        SG_OUT["输出 state 映射"]
+        SG_IN --> SG_NODES --> SG_OUT
+    end
+
+    subgraph SA["Subagent — 管隔离"]
+        SA_MAIN["主 Agent"]
+        SA_TOOL["task 工具"]
+        SA_BOX["黑盒代理<br/>内部不泄露"]
+        SA_SUM["只返回摘要"]
+        SA_MAIN --> SA_TOOL --> SA_BOX --> SA_SUM --> SA_MAIN
+    end
+
+    subgraph REC["出题者推荐"]
+        HYBRID["Subgraph 骨架<br/>+<br/>私有 state 半隔离"]
+    end
+
+    SG --> REC
+    SA -.->|"纯用会丢 evidence"| REC
+
+    style REC fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px

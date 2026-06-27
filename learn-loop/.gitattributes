@@ -1,3 +1,0 @@
-# Shell scripts must use LF (Linux containers)
-*.sh text eol=lf
-docker/entrypoint.sh text eol=lf

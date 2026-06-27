@@ -1,0 +1,35 @@
+flowchart TB
+    subgraph PARENT["父图 State（全局共享）"]
+        RC["raw_chunks"]
+        SM["study_material"]
+        WT["weak_topics"]
+        AQ["all_questions 汇总"]
+    end
+
+    subgraph CHILD["PersonaExam Subgraph（每角色一次调用）"]
+        direction TB
+        IN["注入只读快照"]
+        RAG["RAG 检索 chunk"]
+        WEB["在线搜题"]
+        FUSE["融合生成 10 题"]
+        VAL{"证据自检"}
+        DRAFT["draft / search_log<br/>（私有）"]
+        OUT["final_questions<br/>+ evidence_refs"]
+
+        IN --> RAG --> WEB --> FUSE --> VAL
+        FUSE -.-> DRAFT
+        WEB -.-> DRAFT
+        VAL -->|不通过| FUSE
+        VAL -->|通过| OUT
+    end
+
+    RC --> IN
+    SM --> IN
+    WT --> IN
+    OUT --> AQ
+    AQ --> ANSWER["学生 A 批量作答"]
+    ANSWER --> JUDGE["Judge 评分"]
+
+    style PARENT fill:#bbdefb,stroke:#1565c0
+    style CHILD fill:#e1bee7,stroke:#7b1fa2
+    style DRAFT fill:#ffcdd2,stroke:#c62828
