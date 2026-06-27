@@ -32,6 +32,7 @@ export interface RunSummary {
   params: Record<string, unknown>;
   macro_iter: number;
   batch_accuracy: number;
+  current_questions?: number;
   accuracy_history: number[];
   weak_topics: string[];
   phase: string;

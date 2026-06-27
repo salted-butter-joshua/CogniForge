@@ -1,9 +1,6 @@
 """Graph nodes — fetch, material, study, refine."""
 
-
-
 from __future__ import annotations
-
 
 
 import json
@@ -13,16 +10,13 @@ import logging
 from pathlib import Path
 
 
-
 from langchain_core.messages import HumanMessage, SystemMessage
-
 
 
 from langgraph.types import Overwrite
 
 
-
-from src.config import ensure_output_dir, get_settings, load_loop_config
+from src.config import ensure_output_dir, get_settings, load_loop_config, load_personas
 
 from src.graph.state import LearnLoopState
 
@@ -42,13 +36,9 @@ from src.tools.learning_policy import (
 from src.tools.web_fetch import fetch_and_chunk_urls, material_context
 
 
-
 logger = get_loop_logger()
 
 loop_cfg = load_loop_config()
-
-
-
 
 
 def fetch_pages(state: LearnLoopState) -> dict:
@@ -57,16 +47,17 @@ def fetch_pages(state: LearnLoopState) -> dict:
 
     if not urls:
 
-        return {"status": "failed", "error_message": "No URLs provided", "phase": "fetch"}
+        return {
+            "status": "failed",
+            "error_message": "No URLs provided",
+            "phase": "fetch",
+        }
 
     try:
 
         chunks, manifest = fetch_and_chunk_urls(
-
             urls,
-
             crawl_enabled=state.get("crawl_enabled", True),
-
         )
 
         task_id = state.get("task_id", "default")
@@ -74,29 +65,19 @@ def fetch_pages(state: LearnLoopState) -> dict:
         out = ensure_output_dir(task_id)
 
         (out / "raw_chunks.json").write_text(
-
             json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8"
-
         )
 
         (out / "crawl_manifest.json").write_text(
-
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-
         )
 
         logger.info(
-
             "crawl discovered=%s fetched=%s chunks=%s images=%s",
-
             manifest.get("discovered_per_seed"),
-
             manifest.get("fetched_per_seed"),
-
             manifest.get("total_chunks"),
-
             sum(p.get("images", 0) for p in manifest.get("pages", [])),
-
         )
 
         return {"raw_chunks": chunks, "phase": "generate_material"}
@@ -108,11 +89,7 @@ def fetch_pages(state: LearnLoopState) -> dict:
         return {"status": "failed", "error_message": str(exc), "phase": "fetch"}
 
 
-
-
-
 @llm_retry()
-
 def _generate_material_llm(goal: str, context: str, macro_iter: int) -> dict:
 
     llm = material_llm()
@@ -148,21 +125,13 @@ def _generate_material_llm(goal: str, context: str, macro_iter: int) -> dict:
 }}"""
 
     resp = llm.invoke(
-
         [
-
             SystemMessage(content="只使用提供的原文事实，标注来源 chunk id。"),
-
             HumanMessage(content=prompt),
-
         ]
-
     )
 
     return extract_json(resp.content)
-
-
-
 
 
 def generate_material(state: LearnLoopState) -> dict:
@@ -176,24 +145,19 @@ def generate_material(state: LearnLoopState) -> dict:
     macro = state.get("macro_iter", 0)
     curriculum_level = state.get("curriculum_level", 0)
 
-    unlocked = curriculum_chunks(chunks, curriculum_level, settings.curriculum_pages_per_round)
+    unlocked = curriculum_chunks(
+        chunks, curriculum_level, settings.curriculum_pages_per_round
+    )
 
     context = material_context(unlocked, max_chars=settings.material_context_max_chars)
 
     logger.info(
-
         "generate_material macro=%s curriculum_level=%s unlocked_chunks=%d/%d pages_round=%d",
-
         macro,
-
         curriculum_level,
-
         len(unlocked),
-
         len(chunks),
-
         settings.curriculum_pages_per_round,
-
     )
 
     try:
@@ -213,13 +177,9 @@ def generate_material(state: LearnLoopState) -> dict:
         (out / f"study_material{suffix}.md").write_text(material, encoding="utf-8")
 
         return {
-
             "study_material": material,
-
             "knowledge_cards": cards,
-
             "phase": "student_study",
-
         }
 
     except Exception as exc:
@@ -229,27 +189,15 @@ def generate_material(state: LearnLoopState) -> dict:
         return {"status": "failed", "error_message": str(exc)}
 
 
-
-
-
 @llm_retry()
-
 def _study_llm(
-
     material: str,
-
     weak_topics: list[str],
-
     *,
-
     notes_max_chars: int,
-
     macro_iter: int,
-
     curriculum_level: int,
-
     pages_per_round: int,
-
 ) -> str:
 
     llm = student_llm()
@@ -308,9 +256,6 @@ def _study_llm(
     return notes
 
 
-
-
-
 def student_study(state: LearnLoopState) -> dict:
 
     weak = state.get("weak_topics") or []
@@ -332,19 +277,12 @@ def student_study(state: LearnLoopState) -> dict:
     try:
 
         notes = _study_llm(
-
             study_ctx,
-
             weak,
-
             notes_max_chars=settings.student_notes_study_max_chars,
-
             macro_iter=macro,
-
             curriculum_level=curriculum_level,
-
             pages_per_round=settings.curriculum_pages_per_round,
-
         )
 
         task_id = state.get("task_id", "default")
@@ -362,12 +300,11 @@ def student_study(state: LearnLoopState) -> dict:
         return {"status": "failed", "error_message": str(exc)}
 
 
-
-
-
 def prepare_exam(state: LearnLoopState) -> dict:
+    """Determine how many exam batches to run this macro iteration.
 
-    """Determine how many 50-question batches to run this macro iteration."""
+    One batch = questions_per_persona × (number of personas) questions.
+    """
 
     settings = get_settings()
 
@@ -375,59 +312,38 @@ def prepare_exam(state: LearnLoopState) -> dict:
 
     is_first = macro == 0
 
+    num_personas = max(1, len(load_personas()))
 
+    questions_per_batch = max(1, settings.questions_per_persona * num_personas)
 
     if is_first:
 
-        batches_target = settings.first_round_total_questions // (
-
-            settings.questions_per_persona * 5
-
-        )
+        batches_target = settings.first_round_total_questions // questions_per_batch
 
     else:
 
-        batches_target = settings.focused_round_questions // (
-
-            settings.questions_per_persona * 5
-
-        )
-
-
+        batches_target = settings.focused_round_questions // questions_per_batch
 
     return {
-
         "exam_batch_index": 0,
-
         "exam_batches_target": max(1, batches_target),
-
         "current_batch_qa": Overwrite([]),
-
         "current_batch_questions": [],
-
         "phase": "persona_exam_fanout",
-
     }
 
 
-
-
-
 @llm_retry()
-
 def _refine_material_llm(
-
     material: str,
-
     weak_topics: list[str],
-
     judge_report: str,
-
     new_context: str,
-
     macro_iter: int,
-
+    curriculum_level: int,
 ) -> str:
+
+    settings = get_settings()
 
     llm = material_llm()
 
@@ -474,9 +390,6 @@ Judge 报告摘要：
     return llm_content_to_str(resp.content)
 
 
-
-
-
 def refine_material(state: LearnLoopState) -> dict:
 
     material = state.get("study_material") or ""
@@ -503,46 +416,37 @@ def refine_material(state: LearnLoopState) -> dict:
         else []
     )
 
-    new_context = material_context(delta, max_chars=settings.material_context_max_chars // 2)
+    new_context = material_context(
+        delta, max_chars=settings.material_context_max_chars // 2
+    )
 
     try:
 
-        updated = _refine_material_llm(material, weak, report, new_context, macro)
+        updated = _refine_material_llm(
+            material, weak, report, new_context, macro, curriculum_level
+        )
 
         task_id = state.get("task_id", "default")
 
         out = ensure_output_dir(task_id)
 
         (out / f"study_material_iter_{macro + 1}.md").write_text(
-
             updated, encoding="utf-8"
-
         )
 
         logger.info(
-
             "refine_material macro=%s curriculum_level=%s advanced=%s new_chunks=%d",
-
             macro,
-
             curriculum_level,
-
             advanced,
-
             len(delta),
-
         )
 
         return {
-
             "study_material": updated,
-
             "macro_iter": 1,
-
             "curriculum_advanced": False,
-
             "phase": "student_study",
-
         }
 
     except Exception as exc:
@@ -550,5 +454,3 @@ def refine_material(state: LearnLoopState) -> dict:
         logger.exception("refine_material failed")
 
         return {"status": "failed", "error_message": str(exc)}
-
-

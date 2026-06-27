@@ -54,6 +54,7 @@ class RunSummary(BaseModel):
     params: dict[str, Any]
     macro_iter: int = 0
     batch_accuracy: float = 0.0
+    current_questions: int = 0
     accuracy_history: list[float] = Field(default_factory=list)
     weak_topics: list[str] = Field(default_factory=list)
     phase: str = ""

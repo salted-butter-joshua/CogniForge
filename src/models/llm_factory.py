@@ -11,14 +11,13 @@ from src.config import get_settings
 from src.models.router import configure_provider_env, resolve_role_model
 
 logger = logging.getLogger(__name__)
-_configured = False
 
 
 def _ensure_env() -> None:
-    global _configured
-    if not _configured:
-        configure_provider_env()
-        _configured = True
+    # Re-push provider keys/base URLs into os.environ on every build so that
+    # changes to settings (e.g. a different key for a new run) take effect
+    # without restarting the process. It only writes env vars, so it's cheap.
+    configure_provider_env()
 
 
 def _minimax_extra_body() -> dict[str, Any]:

@@ -6,7 +6,6 @@ import json
 import os
 
 from langchain_core.messages import HumanMessage
-from langgraph.types import Overwrite
 
 from src.config import ensure_output_dir, get_settings, load_loop_config, load_personas
 from src.graph.state import ExamQA, LearnLoopState, QuestionItem

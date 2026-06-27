@@ -1,9 +1,6 @@
 """Judge batch scoring and Observer analysis nodes."""
 
-
-
 from __future__ import annotations
-
 
 
 import json
@@ -13,13 +10,10 @@ import logging
 from collections import Counter
 
 
-
 from langchain_core.messages import HumanMessage, SystemMessage
 
 
-
 from langgraph.types import Overwrite
-
 
 
 from src.config import ensure_output_dir, get_settings, load_rubric
@@ -33,21 +27,13 @@ from src.models.llm_factory import judge_llm, observer_llm
 from src.tools.json_utils import extract_json, llm_retry
 
 from src.tools.learning_policy import (
-
     apply_evidence_cap,
-
     adjust_difficulty_level,
-
     format_batch_evidence_context,
-
     format_evidence_context,
-
     maybe_advance_curriculum_level,
-
     weighted_accuracy,
-
 )
-
 
 
 logger = logging.getLogger(__name__)
@@ -59,61 +45,37 @@ CORRECT_THRESHOLD = RUBRIC.get("rubric", {}).get("correct_threshold", 0.85)
 SCORING_RULES = RUBRIC.get("rubric", {}).get("scoring_rules", [])
 
 
-
-
-
 @llm_retry()
-
 def _judge_batch(
-
     batch: list[ExamQA],
-
     chunks: list[dict],
-
     *,
-
     evidence_only: bool,
-
     evidence_max_chars: int,
-
 ) -> list[dict]:
 
     llm = judge_llm()
 
     items = [
-
         {
-
             "qa_id": q.get("qa_id"),
-
             "question": q.get("question"),
-
             "answer": q.get("answer"),
-
             "evidence_refs": q.get("evidence_refs", []),
-
             "persona": q.get("persona_name"),
-
             "persona_id": q.get("persona_id"),
-
         }
-
         for q in batch
-
     ]
 
     rubric_text = json.dumps(RUBRIC, ensure_ascii=False, indent=2)
 
     rules_text = "\n".join(f"- {r}" for r in SCORING_RULES)
 
-
-
     if evidence_only:
 
         evidence_ctx = format_batch_evidence_context(
-
             chunks, batch, max_chars=evidence_max_chars
-
         )
 
         material_section = f"""每道题可引用的 evidence 原文（仅此范围，无学生笔记、无完整教材）：
@@ -123,8 +85,6 @@ def _judge_batch(
     else:
 
         material_section = "（未启用 evidence-only 模式）"
-
-
 
     prompt = f"""你是独立 Judge B。根据 evidence 原文和评分标准给每道题打分。
 
@@ -181,15 +141,12 @@ score >= {CORRECT_THRESHOLD} 则 is_correct=true。
 证据未覆盖的细节不得因「合理推断」给高分。"""
 
     resp = llm.invoke(
-
         [
-
-            SystemMessage(content="严格客观评分，禁止放水，禁止接受 evidence 外的细节。"),
-
+            SystemMessage(
+                content="严格客观评分，禁止放水，禁止接受 evidence 外的细节。"
+            ),
             HumanMessage(content=prompt),
-
         ]
-
     )
 
     data = extract_json(resp.content)
@@ -199,9 +156,6 @@ score >= {CORRECT_THRESHOLD} 则 is_correct=true。
         data = data.get("results", data.get("scores", []))
 
     return data
-
-
-
 
 
 def judge_score(state: LearnLoopState) -> dict:
@@ -218,37 +172,23 @@ def judge_score(state: LearnLoopState) -> dict:
 
     chunks = list(state.get("raw_chunks") or [])
 
-
-
     if not all_qa:
 
         logger.warning(
-
             "judge_score: no Q&A to score macro=%s — accuracy defaults to 0",
-
             state.get("macro_iter", 0),
-
         )
 
         return {
-
             "batch_accuracy": 0.0,
-
             "phase": "observer_analyze",
-
             "judge_skipped": True,
-
             "judge_skip_reason": "no_qa",
-
         }
-
-
 
     scored: list[ExamQA] = []
 
     weak_counter: Counter = Counter()
-
-
 
     try:
 
@@ -257,20 +197,13 @@ def judge_score(state: LearnLoopState) -> dict:
             chunk = all_qa[i : i + batch_size]
 
             results = _judge_batch(
-
                 chunk,
-
                 chunks,
-
                 evidence_only=settings.judge_evidence_only,
-
                 evidence_max_chars=settings.judge_evidence_max_chars,
-
             )
 
             score_map = {r.get("qa_id"): r for r in results if isinstance(r, dict)}
-
-
 
             for j, qa in enumerate(chunk):
 
@@ -287,21 +220,14 @@ def judge_score(state: LearnLoopState) -> dict:
                 score = float(r.get("score", 0.0))
 
                 evidence_text = format_evidence_context(
-
                     chunks, qa.get("evidence_refs") or []
-
                 )
 
                 capped, cap_reason = apply_evidence_cap(
-
                     qa.get("answer", ""),
-
                     evidence_text,
-
                     score,
-
                     cap=settings.evidence_cap_score,
-
                 )
 
                 if cap_reason:
@@ -320,8 +246,6 @@ def judge_score(state: LearnLoopState) -> dict:
 
                     reason = f"{reason} | {cap_reason}".strip(" |")
 
-
-
                 updated = dict(qa)
 
                 updated["judge_score"] = score
@@ -336,19 +260,19 @@ def judge_score(state: LearnLoopState) -> dict:
 
                 if not is_correct:
 
-                    tag = updated.get("topic_tag") or updated.get("weak_topic_focus") or "未知主题"
+                    tag = (
+                        updated.get("topic_tag")
+                        or updated.get("weak_topic_focus")
+                        or "未知主题"
+                    )
 
                     weak_counter[tag] += 1
-
-
 
         correct = sum(1 for q in scored if q.get("is_correct"))
 
         plain_accuracy = correct / len(scored) if scored else 0.0
 
         accuracy = weighted_accuracy(scored)
-
-
 
         weak_topics = [t for t, _ in weak_counter.most_common(10)]
 
@@ -372,34 +296,19 @@ def judge_score(state: LearnLoopState) -> dict:
 
         history.append(accuracy)
 
-
-
         report_lines = [
-
             f"## Judge Report — Macro Iter {state.get('macro_iter', 0)}",
-
             f"- Total questions: {len(scored)}",
-
             f"- Correct: {correct}",
-
             f"- Plain accuracy: {plain_accuracy:.2%}",
-
             f"- Weighted accuracy: {accuracy:.2%} (used for loop)",
-
             f"- Threshold: {CORRECT_THRESHOLD:.0%}",
-
             f"- Difficulty level: {old_diff} -> {new_diff}",
-
             f"- Curriculum level: {old_curr} -> {new_curr}"
-
             + (" (advanced)" if curr_advanced else " (held)"),
-
             f"- Weak topics: {', '.join(weak_topics) or 'none'}",
-
             "",
-
             "### Per-question",
-
         ]
 
         for q in scored:
@@ -407,16 +316,11 @@ def judge_score(state: LearnLoopState) -> dict:
             mark = "✓" if q.get("is_correct") else "✗"
 
             report_lines.append(
-
                 f"- [{mark}] {q.get('qa_id')} ({q.get('persona_name')}): "
-
                 f"score={q.get('judge_score', 0):.2f} — {q.get('judge_reason', '')[:80]}"
-
             )
 
         report = "\n".join(report_lines)
-
-
 
         task_id = state.get("task_id", "default")
 
@@ -427,51 +331,28 @@ def judge_score(state: LearnLoopState) -> dict:
         (out / f"judge_report_iter_{macro}.md").write_text(report, encoding="utf-8")
 
         (out / f"qa_scored_iter_{macro}.json").write_text(
-
             json.dumps(scored, ensure_ascii=False, indent=2), encoding="utf-8"
-
         )
-
-
 
         log_student_progress(
-
             state,
-
             scored,
-
             accuracy,
-
             weak_topics,
-
             weak_counter=dict(weak_counter),
-
         )
 
-
-
         return {
-
             "current_batch_qa": Overwrite(scored),
-
             "all_qa_archive": scored,
-
             "batch_accuracy": accuracy,
-
             "accuracy_history": history,
-
             "weak_topics": weak_topics,
-
             "difficulty_level": new_diff,
-
             "curriculum_level": new_curr,
-
             "curriculum_advanced": curr_advanced,
-
             "judge_report": report,
-
             "phase": "observer_analyze",
-
         }
 
     except Exception as exc:
@@ -479,9 +360,6 @@ def judge_score(state: LearnLoopState) -> dict:
         logger.exception("judge_score failed")
 
         return {"status": "failed", "error_message": str(exc)}
-
-
-
 
 
 @llm_retry()
@@ -557,6 +435,8 @@ def _build_observer_report(record: ObservationRecord, macro: int) -> str:
 
 
 def observer_analyze(state: LearnLoopState) -> dict:
+    if state.get("status") == "failed":
+        return {}
     qa_list = state.get("current_batch_qa") or []
     study_notes = state.get("study_notes") or ""
     accuracy = state.get("batch_accuracy", 0.0)

@@ -368,8 +368,8 @@ export default function App() {
                   />
                   <MetricCard label="阶段" value={phaseLabel(activeSummary.phase)} />
                   <MetricCard
-                    label="总耗时"
-                    value={formatDuration(timing.runElapsedMs)}
+                    label="当前出题数量"
+                    value={String(activeSummary.current_questions ?? 0)}
                     gold
                     live={isRunning}
                   />
@@ -417,10 +417,15 @@ export default function App() {
 function phaseLabel(phase: string): string {
   const map: Record<string, string> = {
     fetch: "抓取",
+    generate_material: "生成资料",
     student_study: "学习",
+    prepare_exam: "准备考试",
     persona_exam_fanout: "出题",
-    judge: "评分",
+    student_answer_batch: "作答",
+    exam_batch_router: "批次调度",
+    judge_score: "评分",
     observer_analyze: "观察",
+    macro_router: "迭代判定",
     done: "完成",
   };
   return map[phase] || phase || "—";

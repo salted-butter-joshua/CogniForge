@@ -67,7 +67,7 @@ def _get_checkpointer():
         return MemorySaver()
 
 
-def build_graph():
+def _build_graph():
     graph = StateGraph(LearnLoopState)
 
     graph.add_node("fetch_pages", logged_node("fetch_pages")(fetch_pages))
@@ -136,3 +136,20 @@ def build_graph():
 
     checkpointer = _get_checkpointer()
     return graph.compile(checkpointer=checkpointer)
+
+
+_compiled_graph = None
+
+
+def build_graph():
+    """Return a process-wide singleton compiled graph.
+
+    The graph (and its Redis checkpointer connection) is built once and reused
+    across runs; node behavior still reads live settings via get_settings() at
+    runtime, so per-run parameter overrides keep working. Building per-run would
+    leak a Redis connection on every run.
+    """
+    global _compiled_graph
+    if _compiled_graph is None:
+        _compiled_graph = _build_graph()
+    return _compiled_graph

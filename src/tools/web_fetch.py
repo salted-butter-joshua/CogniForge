@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -53,7 +55,42 @@ def _http_client() -> httpx.Client:
     return httpx.Client(timeout=30.0, follow_redirects=True)
 
 
+def _assert_url_allowed(url: str) -> None:
+    """SSRF guard: reject non-HTTP(S) schemes and private/loopback/reserved hosts.
+
+    Note: this validates the requested URL. Redirects are still followed by the
+    client, so a public host redirecting to an internal one is not covered here.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme or '(none)'}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"URL has no host: {url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve host {host}: {exc}") from exc
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            raise ValueError(f"Blocked non-public address for {host}: {ip}")
+
+
 def fetch_html(url: str, client: httpx.Client | None = None) -> str:
+    _assert_url_allowed(url)
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     if client is None:
         with _http_client() as c:

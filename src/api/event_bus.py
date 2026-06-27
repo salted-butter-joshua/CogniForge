@@ -21,7 +21,11 @@ class RunEventBus:
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=2000)
         with self._lock:
-            if not self._closed:
+            if self._closed:
+                # Bus already closed — hand back a queue that ends immediately
+                # so the SSE generator doesn't heartbeat forever.
+                q.put_nowait({"type": "_eof"})
+            else:
                 self._subscribers.append(q)
         return q
 

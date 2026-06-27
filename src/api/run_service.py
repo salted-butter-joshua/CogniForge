@@ -107,15 +107,18 @@ def _build_init_state(params: RunParams, task_id: str) -> dict:
     return state
 
 
+def _questions_in_state(state: dict) -> int:
+    """Questions generated so far this macro round (answered, else just generated)."""
+    return len(state.get("current_batch_qa") or []) or len(
+        state.get("current_batch_questions") or []
+    )
+
+
 def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "") -> RunSummary:
     setup_logging()
     reset_cancel_state()
     _apply_env_overrides(params)
-
     settings = get_settings()
-    ok, err = validate_api_keys(settings)
-    if not ok:
-        raise RuntimeError(err or "API keys not configured")
 
     task_id = params.task_id or f"web_{uuid.uuid4().hex[:8]}"
     thread_id = params.thread_id or task_id
@@ -132,8 +135,24 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
         created_at=created_at,
         label=label or task_id,
     )
+    # Persist the run record BEFORE validating keys, so a config error surfaces
+    # as a visible `failed` run instead of an invisible 404.
     _save_summary(summary)
     bus.publish({"type": "run_start", "task_id": task_id, "summary": summary.model_dump()})
+
+    ok, err = validate_api_keys(settings)
+    if not ok:
+        summary = summary.model_copy(
+            update={
+                "status": "failed",
+                "error_message": err or "API keys not configured",
+                "finished_at": time.time(),
+            }
+        )
+        _save_summary(summary)
+        bus.publish({"type": "error", "message": summary.error_message})
+        bus.close(summary.model_dump())
+        raise RuntimeError(summary.error_message)
 
     runtime = llm_runtime_info(settings)
     log_boot(f"router={runtime['router']} preset={runtime['preset']}")
@@ -188,10 +207,13 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                 )
                 last_macro = macro
 
+            q_count = _questions_in_state(state)
+
             live = summary.model_copy(
                 update={
                     "macro_iter": macro,
                     "batch_accuracy": accuracy,
+                    "current_questions": q_count,
                     "accuracy_history": history,
                     "weak_topics": list(state.get("weak_topics") or []),
                     "phase": phase,
@@ -206,6 +228,7 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                 "status": "cancelled",
                 "macro_iter": int(partial.get("macro_iter", 0) or 0),
                 "batch_accuracy": float(partial.get("batch_accuracy", 0.0) or 0.0),
+                "current_questions": _questions_in_state(partial),
                 "accuracy_history": list(partial.get("accuracy_history") or []),
                 "weak_topics": list(partial.get("weak_topics") or []),
                 "phase": str(partial.get("phase", "")),
@@ -245,6 +268,7 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
             "status": status,
             "macro_iter": int(result.get("macro_iter", 0) or 0),
             "batch_accuracy": float(result.get("batch_accuracy", 0.0) or 0.0),
+            "current_questions": _questions_in_state(result),
             "accuracy_history": list(result.get("accuracy_history") or []),
             "weak_topics": list(result.get("weak_topics") or []),
             "phase": str(result.get("phase", "")),

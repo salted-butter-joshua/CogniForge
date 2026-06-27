@@ -8,7 +8,7 @@
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-1c3c3c?style=flat-square)](https://github.com/langchain-ai/langgraph)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-[Quick Start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Loop Engineering](../loop-engineering.md)
+[Quick Start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Loop Engineering](docs/loop-engineering.md)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## About
 
-**CogniForge** is a production-oriented reference implementation of [Loop Engineering](../loop-engineering.md) for **knowledge acquisition and closed-book mastery verification**. It orchestrates a macro loop—ingest → study → exam → judge → observe → refine—using LangGraph, with a nested **PersonaExam** micro loop for question generation and self-check.
+**CogniForge** is a production-oriented reference implementation of [Loop Engineering](docs/loop-engineering.md) for **knowledge acquisition and closed-book mastery verification**. It orchestrates a macro loop—ingest → study → exam → judge → observe → refine—using LangGraph, with a nested **PersonaExam** micro loop for question generation and self-check.
 
 The goal is not one-shot summarization. CogniForge runs **auditable, multi-round loops** that progressively improve understanding, note quality, and exam performance under realistic constraints (closed-book answers, evidence-only judging, curriculum windows).
 
@@ -229,11 +229,10 @@ python -m src.main --urls … --task-id demo-001 --thread-id demo-001
 
 ## Configuration
 
-**Precedence**
+**Configuration sources**
 
-1. Environment variables (`.env`)
-2. [`config/settings.yaml`](config/settings.yaml) — exam batch sizes, stagnation, some learning thresholds
-3. Pydantic defaults in [`src/config.py`](src/config.py)
+1. The primary `Settings` object — environment variables / `.env`, with Pydantic defaults in [`src/config.py`](src/config.py).
+2. [`config/settings.yaml`](config/settings.yaml) — read **separately** by specific subsystems (exam batch sizes, stagnation, some learning thresholds). It is *not* merged into `Settings`, so it does not override `.env`; the two cover different keys.
 
 > **Local dev tip:** `settings.yaml` ships with lighter exam counts (50 / 30 questions) for faster iteration. Override via `.env` for production-scale runs.
 
@@ -433,4 +432,4 @@ Use Web Console dev presets, or lower <code>first_round_total</code> / <code>foc
 
 - [LangGraph](https://github.com/langchain-ai/langgraph)
 - [LiteLLM](https://github.com/BerriAI/litellm)
-- [Loop Engineering](../loop-engineering.md) methodology
+- [Loop Engineering](docs/loop-engineering.md) methodology
