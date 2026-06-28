@@ -23,6 +23,19 @@ export interface ParamSchema {
   default_preset?: string;
 }
 
+export interface RoundRecord {
+  macro_iter: number;
+  accuracy: number;
+  plain_accuracy: number;
+  difficulty_level: number;
+  curriculum_level: number;
+  question_count: number;
+  correct: number;
+  weak_topics: string[];
+  topic_counts: Record<string, number>;
+  persona_counts: Record<string, number>;
+}
+
 export interface RunSummary {
   run_id: string;
   task_id: string;
@@ -33,7 +46,13 @@ export interface RunSummary {
   macro_iter: number;
   batch_accuracy: number;
   current_questions?: number;
+  token_total?: number;
+  token_input?: number;
+  token_output?: number;
+  token_calls?: number;
+  tokens_by_step?: Record<string, number>;
   accuracy_history: number[];
+  round_records?: RoundRecord[];
   weak_topics: string[];
   phase: string;
   error_message: string;

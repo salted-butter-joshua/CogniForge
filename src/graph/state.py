@@ -80,6 +80,7 @@ class LearnLoopState(TypedDict, total=False):
 
     batch_accuracy: float
     accuracy_history: list[float]
+    round_records: Annotated[list[dict], merge_qa_lists]
     weak_topics: list[str]
     judge_report: str
 

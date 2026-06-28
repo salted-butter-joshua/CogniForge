@@ -327,6 +327,11 @@ body::before {
   box-shadow: 0 0 10px var(--warn);
 }
 
+.status-pill.interrupted .status-dot {
+  background: var(--text-dim);
+  box-shadow: 0 0 8px var(--text-dim);
+}
+
 @keyframes pulse {
   0%,
   100% {
@@ -724,7 +729,7 @@ body::before {
 
 .timing-bar-row {
   display: grid;
-  grid-template-columns: 120px 1fr 56px;
+  grid-template-columns: 120px 1fr 56px 60px;
   align-items: center;
   gap: 10px;
 }
@@ -761,6 +766,13 @@ body::before {
   font-family: var(--mono);
   font-size: 0.72rem;
   color: var(--accent);
+  text-align: right;
+}
+
+.timing-bar-tokens {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--violet);
   text-align: right;
 }
 
@@ -1029,6 +1041,89 @@ body::before {
   padding: 12px 4px 4px;
 }
 
+.round-detail-hint {
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  border-top: 1px dashed var(--border);
+}
+
+.round-detail {
+  margin-top: 10px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(145deg, rgba(99, 102, 241, 0.1), rgba(168, 85, 247, 0.06));
+}
+
+.round-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.round-detail-head strong {
+  font-size: 0.95rem;
+}
+
+.round-detail-head span {
+  font-size: 0.8rem;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+
+.round-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+
+.round-detail-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+
+.rd-label {
+  display: inline-block;
+  min-width: 64px;
+  margin-right: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rd-chip {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  background: var(--accent-dim);
+  color: #c4b5fd;
+  border: 1px solid var(--border);
+}
+
+.rd-chip.warn {
+  background: var(--gold-dim);
+  color: var(--gold);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+@media (max-width: 640px) {
+  .round-detail-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .compare-list {
   max-height: 200px;
   overflow-y: auto;
@@ -1134,6 +1229,6 @@ body::before {
     grid-template-columns: 1fr;
   }
   .timing-bar-row {
-    grid-template-columns: 90px 1fr 48px;
+    grid-template-columns: 90px 1fr 48px 52px;
   }
 }

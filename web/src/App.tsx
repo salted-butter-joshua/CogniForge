@@ -183,6 +183,7 @@ export default function App() {
     cancelled: "已取消",
     stagnated: "停滞",
     max_iter_reached: "达上限",
+    interrupted: "已中断",
   };
 
   return (
@@ -350,6 +351,8 @@ export default function App() {
               latestMacro={timing.latestMacro}
               macroDurations={timing.macroDurations}
               isRunning={!!isRunning}
+              tokenTotal={activeSummary?.token_total ?? 0}
+              tokensByStep={activeSummary?.tokens_by_step ?? {}}
             />
 
             {activeSummary && (
@@ -404,6 +407,7 @@ export default function App() {
               targetAccuracy={(params.target_accuracy as number) ?? 0.85}
               liveHistory={liveHistory}
               liveMacro={activeSummary?.macro_iter}
+              roundRecords={activeSummary?.round_records}
             />
           </div>
         )}

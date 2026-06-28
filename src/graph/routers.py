@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.config import get_settings, load_loop_config
 from src.graph.state import LearnLoopState
+from src.tools.learning_policy import max_curriculum_level
 
 loop_cfg = load_loop_config()
 
@@ -89,7 +90,17 @@ def _meets_success_criteria(state: LearnLoopState) -> bool:
     if len(history) < streak_need:
         return False
     recent = history[-streak_need:]
-    return all(h >= target for h in recent)
+    if not all(h >= target for h in recent):
+        return False
+
+    # Coverage gate: do not declare success until the whole handbook has been
+    # unlocked. Otherwise easy questions over just the first few pages could
+    # "pass" before all the linked content is actually learned.
+    raw_chunks = state.get("raw_chunks") or []
+    max_level = max_curriculum_level(raw_chunks, settings.curriculum_pages_per_round)
+    if int(state.get("curriculum_level", 0) or 0) < max_level:
+        return False
+    return True
 
 
 def _is_stagnated(state: LearnLoopState) -> bool:

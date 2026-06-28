@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from src.logging_config import log_step_done, log_step_start
+from src.tools.token_tracker import set_current_step
 
 F = TypeVar("F", bound=Callable[..., dict])
 
@@ -16,6 +17,7 @@ def logged_node(step: str) -> Callable[[F], F]:
     def decorator(fn: F) -> F:
         def wrapper(state: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
             log_step_start(state, step)
+            set_current_step(step)
             result = fn(state, *args, **kwargs)
             log_step_done(state, step, result)
             return result

@@ -14,13 +14,16 @@ from fastapi.staticfiles import StaticFiles
 from src.api.job_manager import job_manager
 from src.api.models import RunCreateResponse, RunParams, RunSummary
 from src.api.param_schema import get_param_schema
-from src.api.run_service import list_summaries, load_summary
+from src.api.run_service import list_summaries, load_summary, reconcile_stale_runs
 
 app = FastAPI(
     title="CogniForge Console API",
     description="Loop Engineering — web control plane",
     version="1.0.0",
 )
+
+# On startup, any run still marked 'running' belongs to a dead process.
+reconcile_stale_runs()
 
 app.add_middleware(
     CORSMiddleware,

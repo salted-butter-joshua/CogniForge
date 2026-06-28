@@ -296,6 +296,24 @@ def judge_score(state: LearnLoopState) -> dict:
 
         history.append(accuracy)
 
+        # Per-round record for the curve tooltip / clickable detail panel.
+        topic_counts = Counter(q.get("topic_tag") or "未分类" for q in scored)
+        persona_counts = Counter(
+            q.get("persona_name") or q.get("persona_id") or "?" for q in scored
+        )
+        round_record = {
+            "macro_iter": int(state.get("macro_iter", 0) or 0),
+            "accuracy": accuracy,
+            "plain_accuracy": plain_accuracy,
+            "difficulty_level": old_diff,
+            "curriculum_level": old_curr,
+            "question_count": len(scored),
+            "correct": correct,
+            "weak_topics": weak_topics[:6],
+            "topic_counts": dict(topic_counts.most_common(8)),
+            "persona_counts": dict(persona_counts),
+        }
+
         report_lines = [
             f"## Judge Report — Macro Iter {state.get('macro_iter', 0)}",
             f"- Total questions: {len(scored)}",
@@ -352,6 +370,7 @@ def judge_score(state: LearnLoopState) -> dict:
             "curriculum_level": new_curr,
             "curriculum_advanced": curr_advanced,
             "judge_report": report,
+            "round_records": [round_record],
             "phase": "observer_analyze",
         }
 
@@ -474,5 +493,8 @@ def observer_analyze(state: LearnLoopState) -> dict:
             "phase": "macro_router",
         }
     except Exception as exc:
-        logger.exception("observer_analyze failed")
-        return {"status": "failed", "error_message": str(exc)}
+        # The observer report is archival only (never fed back to the student),
+        # so a failure here (e.g. malformed LLM JSON) must NOT abort the macro
+        # loop. Log it and continue to the router.
+        logger.warning("observer_analyze skipped (non-fatal): %s", exc)
+        return {"phase": "macro_router"}

@@ -10,6 +10,13 @@ export function formatDuration(ms: number): string {
   return `${h}:${rm.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
+export function formatTokens(n: number): string {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 export function formatClock(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString("zh-CN", {
     hour: "2-digit",

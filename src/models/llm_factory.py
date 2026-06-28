@@ -9,6 +9,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.config import get_settings
 from src.models.router import configure_provider_env, resolve_role_model
+from src.tools.token_tracker import token_callback
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +115,19 @@ def _base_llm(role: str, temperature: float) -> BaseChatModel:
 
     logger.debug("LLM role=%s router=%s model=%s", role, router, model)
 
-    if router == "litellm":
-        return _build_litellm(model, temperature)
     if router == "openrouter":
-        return _build_openrouter(model, temperature)
-    if router == "anthropic":
-        return _build_anthropic(model, temperature)
-    if router == "minimax":
-        return _build_minimax(model, temperature)
-    return _build_openai(model, temperature)
+        llm = _build_openrouter(model, temperature)
+    elif router == "anthropic":
+        llm = _build_anthropic(model, temperature)
+    elif router == "minimax":
+        llm = _build_minimax(model, temperature)
+    elif router == "openai":
+        llm = _build_openai(model, temperature)
+    else:
+        llm = _build_litellm(model, temperature)
+
+    # Attach the token-usage callback so every call is counted per step.
+    return llm.with_config({"callbacks": [token_callback]})
 
 
 def student_llm() -> BaseChatModel:
@@ -134,7 +139,8 @@ def persona_llm() -> BaseChatModel:
 
 
 def judge_llm() -> BaseChatModel:
-    return _base_llm("judge", temperature=0.0)
+    # Slight freedom so scoring weighs both fit-to-evidence and answer flexibility.
+    return _base_llm("judge", temperature=0.2)
 
 
 def observer_llm() -> BaseChatModel:
@@ -142,4 +148,5 @@ def observer_llm() -> BaseChatModel:
 
 
 def material_llm() -> BaseChatModel:
-    return _base_llm("material", temperature=0.2)
+    # Zero temperature: study material must stay faithful to the source, no drift.
+    return _base_llm("material", temperature=0.0)

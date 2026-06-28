@@ -28,6 +28,7 @@ from src.logging_config import (
 )
 from src.main import build_initial_state
 from src.models.router import llm_runtime_info, validate_api_keys
+from src.tools.token_tracker import tracker as token_tracker
 
 logger = get_loop_logger()
 
@@ -48,6 +49,28 @@ def load_summary(run_id: str) -> RunSummary | None:
     if not path.exists():
         return None
     return RunSummary.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def reconcile_stale_runs() -> int:
+    """Mark runs left in 'running' (process died mid-run) as interrupted.
+
+    Called at server startup: a fresh process means any previously-running run
+    is dead, so it should become terminal — otherwise it stays invisible to the
+    compare list (which filters out 'running') and its curve is never shown.
+    """
+    count = 0
+    for summary in list_summaries():
+        if summary.status == "running":
+            summary = summary.model_copy(
+                update={
+                    "status": "interrupted",
+                    "finished_at": summary.finished_at or time.time(),
+                    "error_message": summary.error_message or "进程中断（未正常结束）",
+                }
+            )
+            _save_summary(summary)
+            count += 1
+    return count
 
 
 def list_summaries() -> list[RunSummary]:
@@ -117,6 +140,7 @@ def _questions_in_state(state: dict) -> int:
 def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "") -> RunSummary:
     setup_logging()
     reset_cancel_state()
+    token_tracker.reset()
     _apply_env_overrides(params)
     settings = get_settings()
 
@@ -215,8 +239,10 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                     "batch_accuracy": accuracy,
                     "current_questions": q_count,
                     "accuracy_history": history,
+                    "round_records": list(state.get("round_records") or []),
                     "weak_topics": list(state.get("weak_topics") or []),
                     "phase": phase,
+                    **token_tracker.snapshot(),
                 }
             )
             _save_summary(live)
@@ -230,10 +256,12 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                 "batch_accuracy": float(partial.get("batch_accuracy", 0.0) or 0.0),
                 "current_questions": _questions_in_state(partial),
                 "accuracy_history": list(partial.get("accuracy_history") or []),
+                "round_records": list(partial.get("round_records") or []),
                 "weak_topics": list(partial.get("weak_topics") or []),
                 "phase": str(partial.get("phase", "")),
                 "error_message": "用户通过控制台停止",
                 "finished_at": time.time(),
+                **token_tracker.snapshot(),
             }
         )
         _write_final_summary(task_id, summary)
@@ -270,10 +298,12 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
             "batch_accuracy": float(result.get("batch_accuracy", 0.0) or 0.0),
             "current_questions": _questions_in_state(result),
             "accuracy_history": list(result.get("accuracy_history") or []),
+            "round_records": list(result.get("round_records") or []),
             "weak_topics": list(result.get("weak_topics") or []),
             "phase": str(result.get("phase", "")),
             "error_message": str(result.get("error_message", "")),
             "finished_at": time.time(),
+            **token_tracker.snapshot(),
         }
     )
     _save_summary(summary)

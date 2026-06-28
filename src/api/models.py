@@ -55,7 +55,13 @@ class RunSummary(BaseModel):
     macro_iter: int = 0
     batch_accuracy: float = 0.0
     current_questions: int = 0
+    token_total: int = 0
+    token_input: int = 0
+    token_output: int = 0
+    token_calls: int = 0
+    tokens_by_step: dict[str, int] = Field(default_factory=dict)
     accuracy_history: list[float] = Field(default_factory=list)
+    round_records: list[dict] = Field(default_factory=list)
     weak_topics: list[str] = Field(default_factory=list)
     phase: str = ""
     error_message: str = ""

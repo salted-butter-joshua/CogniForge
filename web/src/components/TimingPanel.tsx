@@ -1,5 +1,5 @@
-import { Clock, Gauge, Layers, Timer } from "lucide-react";
-import { formatDuration } from "../utils/format";
+import { Coins, Gauge, Layers, Timer } from "lucide-react";
+import { formatDuration, formatTokens } from "../utils/format";
 import type { StepRecord } from "../types";
 
 interface Props {
@@ -12,6 +12,8 @@ interface Props {
   latestMacro: number;
   macroDurations: Map<number, number>;
   isRunning: boolean;
+  tokenTotal: number;
+  tokensByStep: Record<string, number>;
 }
 
 export default function TimingPanel({
@@ -24,6 +26,8 @@ export default function TimingPanel({
   latestMacro,
   macroDurations,
   isRunning,
+  tokenTotal,
+  tokensByStep,
 }: Props) {
   const macroMs = macroDurations.get(latestMacro) ?? 0;
 
@@ -57,10 +61,10 @@ export default function TimingPanel({
           sub={`已追踪 ${formatDuration(totalTrackedMs)}`}
         />
         <TimingStat
-          icon={<Clock size={18} />}
-          label="步骤数"
-          value={String(stepTotals.reduce((s, t) => s + t.count, 0))}
-          sub={`${stepTotals.length} 类节点`}
+          icon={<Coins size={18} />}
+          label="Token 总量"
+          value={formatTokens(tokenTotal)}
+          sub={`${stepTotals.reduce((s, t) => s + t.count, 0)} 步 · ${stepTotals.length} 类节点`}
           gold
         />
       </div>
@@ -68,25 +72,29 @@ export default function TimingPanel({
       {stepTotals.length > 0 && (
         <div className="timing-breakdown">
           <div className="timing-breakdown-header">
-            <span>步骤耗时分布</span>
+            <span>步骤耗时 / Token 分布</span>
             <span className="muted">按累计时间排序</span>
           </div>
           <div className="timing-bars">
-            {stepTotals.slice(0, 8).map((s) => (
-              <div key={s.step} className="timing-bar-row">
-                <div className="timing-bar-label" title={s.step}>
-                  {s.label}
-                  {s.count > 1 && <span className="timing-count">×{s.count}</span>}
+            {stepTotals.slice(0, 8).map((s) => {
+              const tok = tokensByStep[s.step] ?? 0;
+              return (
+                <div key={s.step} className="timing-bar-row">
+                  <div className="timing-bar-label" title={s.step}>
+                    {s.label}
+                    {s.count > 1 && <span className="timing-count">×{s.count}</span>}
+                  </div>
+                  <div className="timing-bar-track">
+                    <div
+                      className="timing-bar-fill"
+                      style={{ width: `${Math.max(4, (s.ms / maxStepMs) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="timing-bar-value">{formatDuration(s.ms)}</div>
+                  <div className="timing-bar-tokens">{tok ? formatTokens(tok) : "—"}</div>
                 </div>
-                <div className="timing-bar-track">
-                  <div
-                    className="timing-bar-fill"
-                    style={{ width: `${Math.max(4, (s.ms / maxStepMs) * 100)}%` }}
-                  />
-                </div>
-                <div className="timing-bar-value">{formatDuration(s.ms)}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

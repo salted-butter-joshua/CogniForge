@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from collections import Counter
 
 from langchain_core.messages import HumanMessage
 
@@ -36,6 +38,8 @@ def build_persona_exam_input(
     parent: LearnLoopState,
     persona: dict,
     batch_idx: int,
+    persona_index: int = 0,
+    num_personas: int = 1,
 ) -> PersonaExamState:
     settings = get_settings()
     macro = parent.get("macro_iter", 0)
@@ -45,6 +49,22 @@ def build_persona_exam_input(
     unlocked = curriculum_chunks(
         all_chunks, curriculum_level, settings.curriculum_pages_per_round
     )
+
+    # (A) Give each persona a DIFFERENT focus so they don't all ask the same
+    # thing. Weak topics are split round-robin; each persona also gets a distinct
+    # slice of chunk titles to emphasize (full chunks still passed for evidence).
+    num_personas = max(1, num_personas)
+    all_weak = list(parent.get("weak_topics") or [])
+    persona_weak = all_weak[persona_index::num_personas]
+    focus_titles: list[str] = []
+    seen_titles: set[str] = set()
+    for chunk in unlocked[persona_index::num_personas]:
+        title = (chunk.get("title") or "").strip()
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            focus_titles.append(title)
+    focus_hint = "、".join(focus_titles[:6])
+
     return PersonaExamState(
         persona_id=persona["id"],
         persona_name=persona["name"],
@@ -52,7 +72,8 @@ def build_persona_exam_input(
         persona_prompt_hint=persona.get("prompt_hint", ""),
         material_snapshot=parent.get("study_material") or "",
         chunks_snapshot=unlocked,
-        weak_topics_snapshot=list(parent.get("weak_topics") or []),
+        weak_topics_snapshot=persona_weak,
+        focus_hint=focus_hint,
         macro_iter_snapshot=macro,
         difficulty_level_snapshot=difficulty_level,
         curriculum_level_snapshot=curriculum_level,
@@ -91,6 +112,55 @@ def _invoke_persona_exam(state: PersonaExamState) -> list[QuestionItem]:
         return []
 
 
+_DUP_STOP = set("的了是在与和及对请吗呢以可并把被为之而其所这那有就都也很还要会能给出")
+
+
+def _dup_tokens(text: str) -> set[str]:
+    """Content tokens for near-duplicate detection: CJK chars + ascii words."""
+    text = text or ""
+    cjk = {c for c in text if "一" <= c <= "鿿" and c not in _DUP_STOP}
+    words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", text) if len(w) > 1}
+    return cjk | words
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _dedupe_questions(
+    questions: list[QuestionItem],
+    threshold: float = 0.6,
+    same_tag_threshold: float = 0.35,
+) -> list[QuestionItem]:
+    """(B) Drop near-duplicate questions across personas.
+
+    Two questions are duplicates if their content tokens overlap past
+    ``threshold``, OR they share a topic_tag and overlap past the lower
+    ``same_tag_threshold`` (same tag strongly signals the same concept, which is
+    how reworded "define X" questions slip through plain token overlap).
+    """
+    kept: list[QuestionItem] = []
+    kept_tokens: list[set[str]] = []
+    kept_tags: list[str] = []
+    for q in questions:
+        toks = _dup_tokens(q.get("question", ""))
+        tag = (q.get("topic_tag") or "").strip()
+        is_dup = False
+        for ktoks, ktag in zip(kept_tokens, kept_tags):
+            j = _jaccard(toks, ktoks)
+            if j >= threshold or (tag and tag == ktag and j >= same_tag_threshold):
+                is_dup = True
+                break
+        if is_dup:
+            continue
+        kept.append(q)
+        kept_tokens.append(toks)
+        kept_tags.append(tag)
+    return kept
+
+
 def fanout_persona_exams(state: LearnLoopState) -> dict:
     """Run five persona subgraphs sequentially and collect all questions."""
     if state.get("status") == "failed":
@@ -101,20 +171,27 @@ def fanout_persona_exams(state: LearnLoopState) -> dict:
     task_id = state.get("task_id", "default")
 
     all_questions: list[QuestionItem] = []
-    by_persona: dict[str, int] = {}
+    raw_by_persona: dict[str, int] = {}
 
-    for persona in PERSONAS:
-        inp = build_persona_exam_input(state, persona, batch_idx)
+    for idx, persona in enumerate(PERSONAS):
+        inp = build_persona_exam_input(state, persona, batch_idx, idx, len(PERSONAS))
         qs = _invoke_persona_exam(inp)
-        pid = persona["id"]
-        by_persona[pid] = len(qs)
+        raw_by_persona[persona["id"]] = len(qs)
         all_questions.extend(qs)
 
+    # (B) Remove cross-persona duplicates before scoring.
+    deduped = _dedupe_questions(all_questions)
+    removed = len(all_questions) - len(deduped)
+    all_questions = deduped
+    by_persona = dict(Counter(q.get("persona_id", "?") for q in all_questions))
+
     logger.info(
-        "fanout macro=%s batch=%s total_questions=%d by_persona=%s",
+        "fanout macro=%s batch=%s total_questions=%d (deduped from %d, -%d) by_persona=%s",
         macro,
         batch_idx,
         len(all_questions),
+        len(all_questions) + removed,
+        removed,
         by_persona,
     )
 

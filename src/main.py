@@ -56,6 +56,7 @@ def build_initial_state(
         "all_qa_archive": [],
         "batch_accuracy": 0.0,
         "accuracy_history": [],
+        "round_records": [],
         "weak_topics": [],
         "judge_report": "",
         "observations": [],

@@ -108,6 +108,14 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
         ppr = get_settings().curriculum_pages_per_round
         range_hint = f"出题范围仅限：{curriculum_page_range_label(curriculum_level, ppr)}。"
 
+    focus = state.get("focus_hint") or ""
+    focus_hint_text = (
+        f"本角色的出题重点章节：{focus}。请优先围绕这些章节命题，"
+        f"尽量与其他出题角色错开，不要和别人重复同一个最基础的概念题。"
+        if focus
+        else ""
+    )
+
     rag_ctx = _format_chunks_for_prompt(state.get("retrieved_chunks") or [])
     search_ctx = json.dumps(state.get("search_results") or [], ensure_ascii=False)[:4000]
     errors = state.get("validation_errors") or []
@@ -118,6 +126,7 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
     prompt = f"""你扮演「{state.get('persona_name')}」（{state.get('persona_style')}）。
 {state.get('persona_prompt_hint')}
 {range_hint}
+{focus_hint_text}
 {diff_hint}
 {weak_hint}
 {error_hint}
