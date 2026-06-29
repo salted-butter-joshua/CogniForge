@@ -1,3 +1,22 @@
+export interface CrawlPreviewSeed {
+  url: string;
+  discovered_total: number;
+  curriculum_mode: string;
+  parts: string[];
+  entries_preview: Array<{
+    display_title: string;
+    url: string;
+    part_title?: string;
+  }>;
+  error?: string;
+}
+
+export interface CrawlPreview {
+  seeds: CrawlPreviewSeed[];
+  discovered_total: number;
+  crawl_enabled: boolean;
+}
+
 export interface ParamField {
   key: string;
   label: string;
@@ -7,6 +26,8 @@ export interface ParamField {
   min?: number;
   max?: number;
   group: string;
+  visible_when_key?: string;
+  visible_when_equals?: unknown;
 }
 
 export interface ParamPreset {
@@ -27,13 +48,27 @@ export interface RoundRecord {
   macro_iter: number;
   accuracy: number;
   plain_accuracy: number;
+  chapter_accuracy?: number;
   difficulty_level: number;
   curriculum_level: number;
+  current_chapter_index?: number;
+  chapter_title?: string;
   question_count: number;
   correct: number;
   weak_topics: string[];
   topic_counts: Record<string, number>;
   persona_counts: Record<string, number>;
+  chapter_progress?: ChapterProgress[];
+}
+
+export interface ChapterProgress {
+  chapter_id: string;
+  chapter_title: string;
+  chapter_index: number;
+  mastered: boolean;
+  accuracy: number;
+  best_accuracy: number;
+  attempts: number;
 }
 
 export interface RunSummary {
@@ -53,6 +88,10 @@ export interface RunSummary {
   tokens_by_step?: Record<string, number>;
   accuracy_history: number[];
   round_records?: RoundRecord[];
+  chapter_mastery?: Record<string, unknown>;
+  chapter_progress?: ChapterProgress[];
+  current_chapter_index?: number;
+  learning_mode?: string;
   weak_topics: string[];
   phase: string;
   error_message: string;

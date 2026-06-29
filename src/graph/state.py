@@ -15,6 +15,7 @@ class QuestionItem(TypedDict, total=False):
     weak_topic_focus: str
     persona_id: str
     persona_name: str
+    is_reinforce: bool
 
 
 class ExamQA(TypedDict, total=False):
@@ -31,6 +32,18 @@ class ExamQA(TypedDict, total=False):
     judge_reason: str
     is_correct: bool
     topic_tag: str
+    is_reinforce: bool
+
+
+class ChapterMastery(TypedDict, total=False):
+    chapter_id: str
+    chapter_title: str
+    accuracy: float
+    best_accuracy: float
+    attempts: int
+    mastered: bool
+    mastered_at_iter: int
+    weak_subtopics: list[str]
 
 
 class ObservationRecord(TypedDict, total=False):
@@ -58,6 +71,14 @@ class LearnLoopState(TypedDict, total=False):
     study_material: str
     knowledge_cards: list[dict]
     study_notes: str
+    long_term_notes: str
+    short_term_notes: str
+
+    chapter_registry: list[dict]
+    current_chapter_index: int
+    chapter_mastery: dict[str, ChapterMastery]
+    chapter_advanced: bool
+    regenerate_material: bool
 
     macro_iter: Annotated[int, operator.add]
     curriculum_level: int
@@ -77,6 +98,9 @@ class LearnLoopState(TypedDict, total=False):
     current_batch_questions: list[QuestionItem]
     current_batch_qa: Annotated[list[ExamQA], merge_qa_lists]
     all_qa_archive: Annotated[list[ExamQA], merge_qa_lists]
+    reinforce_questions: list[QuestionItem]
+    chapter_notes_archive: list[dict]
+    learning_journal: str
 
     batch_accuracy: float
     accuracy_history: list[float]

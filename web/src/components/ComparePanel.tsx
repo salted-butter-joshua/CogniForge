@@ -1,31 +1,50 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listRuns } from "../api";
 import LearningCurve from "./LearningCurve";
 import type { RunSummary } from "../types";
 
-export default function ComparePanel() {
+interface Props {
+  activeRunId?: string | null;
+  onSelectRun?: (run: RunSummary) => void;
+}
+
+export default function ComparePanel({ activeRunId, onSelectRun }: Props) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     setLoading(true);
     listRuns()
       .then((data) => {
-        const finished = data.filter(
-          (r) => r.accuracy_history.length > 0 && r.status !== "running"
+        const comparable = data.filter(
+          (r) =>
+            r.status !== "running" &&
+            (r.accuracy_history.length > 0 ||
+              r.macro_iter > 0 ||
+              r.batch_accuracy > 0 ||
+              Boolean(r.phase))
         );
-        setRuns(finished);
-        if (selected.size === 0 && finished.length > 0) {
-          setSelected(new Set(finished.slice(0, 3).map((r) => r.run_id)));
-        }
+        setRuns(comparable);
+        setSelected((prev) => {
+          if (prev.size > 0) {
+            const kept = new Set(
+              [...prev].filter((id) => comparable.some((r) => r.run_id === id))
+            );
+            if (kept.size > 0) return kept;
+          }
+          if (activeRunId && comparable.some((r) => r.run_id === activeRunId)) {
+            return new Set([activeRunId]);
+          }
+          return new Set(comparable.slice(0, 3).map((r) => r.run_id));
+        });
       })
       .finally(() => setLoading(false));
-  };
+  }, [activeRunId]);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -46,7 +65,7 @@ export default function ComparePanel() {
             <div>
               <strong>实验对比</strong>
               <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: 4 }}>
-                选择不同参数配置的历史运行，对比学习曲线，评估哪些调整更有效
+                选择不同参数配置的历史运行，对比学习曲线（含已中断、进行中的部分进度）
               </p>
             </div>
             <button className="btn" style={{ background: "var(--accent-dim)", color: "var(--accent)", border: "1px solid var(--border)" }} onClick={refresh}>
@@ -56,7 +75,7 @@ export default function ComparePanel() {
           {loading ? (
             <p style={{ color: "var(--text-muted)" }}>加载中…</p>
           ) : runs.length === 0 ? (
-            <p style={{ color: "var(--text-muted)" }}>暂无已完成的历史运行</p>
+            <p style={{ color: "var(--text-muted)" }}>暂无可对比的历史运行（请先完成或中断至少一次任务）</p>
           ) : (
             <div className="compare-list">
               {runs.map((r) => (
@@ -69,12 +88,27 @@ export default function ComparePanel() {
                   <div className="compare-meta">
                     <strong>{r.label || r.task_id}</strong>
                     <span>
-                      {r.status} · {r.accuracy_history.length} 轮 · 最高{" "}
+                      {r.status} · {r.accuracy_history.length || 0} 轮 · 最高{" "}
                       {r.accuracy_history.length
                         ? (Math.max(...r.accuracy_history) * 100).toFixed(1)
-                        : 0}
-                      % · closed_book=
-                      {String(r.params?.closed_book_exam ?? "?")}
+                        : (r.batch_accuracy * 100).toFixed(1)}
+                      %
+                      {onSelectRun && (
+                        <>
+                          {" · "}
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ padding: 0, fontSize: "inherit", color: "var(--accent)" }}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onSelectRun(r);
+                            }}
+                          >
+                            查看
+                          </button>
+                        </>
+                      )}
                     </span>
                   </div>
                 </label>

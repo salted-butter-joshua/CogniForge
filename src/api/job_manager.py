@@ -10,6 +10,8 @@ from typing import Any
 from src.api.event_bus import RunEventBus
 from src.api.models import RunParams, RunSummary
 from src.api.run_service import execute_run, load_summary, stop_run
+from src.config import get_settings
+from src.models.router import validate_api_keys
 
 
 class JobManager:
@@ -29,6 +31,13 @@ class JobManager:
             return self._buses.get(run_id)
 
     def start_run(self, params: RunParams, label: str = "") -> tuple[str, str]:
+        ok, err = validate_api_keys(get_settings())
+        if not ok:
+            raise RuntimeError(
+                err
+                or "LLM API key not configured. Copy .env.example to .env and set MINIMAX_API_KEY (or another provider key)."
+            )
+
         with self._lock:
             if self._active_run_id:
                 active = load_summary(self._active_run_id)

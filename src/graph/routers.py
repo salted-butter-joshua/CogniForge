@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from src.config import get_settings, load_loop_config
 from src.graph.state import LearnLoopState
-from src.tools.learning_policy import max_curriculum_level
+from src.tools.learning_policy import (
+    all_chapters_mastered,
+    is_chapter_mastery_mode,
+    max_curriculum_level,
+)
 
 loop_cfg = load_loop_config()
 
@@ -85,6 +89,13 @@ def _meets_success_criteria(state: LearnLoopState) -> bool:
 
     if macro + 1 < min_iter:
         return False
+
+    raw_chunks = state.get("raw_chunks") or []
+    if is_chapter_mastery_mode():
+        registry = state.get("chapter_registry") or []
+        mastery = state.get("chapter_mastery") or {}
+        return all_chapters_mastered(registry, mastery)
+
     if accuracy < target:
         return False
     if len(history) < streak_need:
@@ -93,10 +104,6 @@ def _meets_success_criteria(state: LearnLoopState) -> bool:
     if not all(h >= target for h in recent):
         return False
 
-    # Coverage gate: do not declare success until the whole handbook has been
-    # unlocked. Otherwise easy questions over just the first few pages could
-    # "pass" before all the linked content is actually learned.
-    raw_chunks = state.get("raw_chunks") or []
     max_level = max_curriculum_level(raw_chunks, settings.curriculum_pages_per_round)
     if int(state.get("curriculum_level", 0) or 0) < max_level:
         return False
@@ -132,11 +139,27 @@ def _terminal_status(state: LearnLoopState) -> str | None:
     return None
 
 
+def route_after_judge(state: LearnLoopState) -> str:
+    if state.get("status") == "failed":
+        return "finalize"
+    if state.get("phase") == "consolidate_chapter_notes":
+        return "consolidate_chapter_notes"
+    return "observer_analyze"
+
+
+def route_after_consolidate(state: LearnLoopState) -> str:
+    if state.get("status") == "failed":
+        return "finalize"
+    return "observer_analyze"
+
+
 def macro_router(state: LearnLoopState) -> str:
     if state.get("status") == "failed":
         return "finalize"
     if _terminal_status(state) is not None:
         return "finalize"
+    if state.get("regenerate_material"):
+        return "generate_material"
     return "refine_material"
 
 

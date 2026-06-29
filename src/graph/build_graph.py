@@ -16,6 +16,7 @@ from src.graph.nodes.exam import (
 )
 from src.graph.nodes.judge import judge_score, observer_analyze
 from src.graph.nodes.material import (
+    consolidate_chapter_notes,
     fetch_pages,
     generate_material,
     prepare_exam,
@@ -26,7 +27,9 @@ from src.graph.routers import (
     exam_batch_router,
     finalize_status,
     macro_router,
+    route_after_consolidate,
     route_after_fetch,
+    route_after_judge,
     route_after_material,
     route_after_fanout,
     route_after_aggregate,
@@ -79,6 +82,10 @@ def _build_graph():
     graph.add_node("student_answer_batch", logged_node("student_answer_batch")(student_answer_batch))
     graph.add_node("aggregate_qa", logged_node("aggregate_qa")(aggregate_qa))
     graph.add_node("judge_score", logged_node("judge_score")(judge_score))
+    graph.add_node(
+        "consolidate_chapter_notes",
+        logged_node("consolidate_chapter_notes")(consolidate_chapter_notes),
+    )
     graph.add_node("observer_analyze", logged_node("observer_analyze")(observer_analyze))
     graph.add_node("refine_material", logged_node("refine_material")(refine_material))
     graph.add_node("finalize", logged_node("finalize")(finalize_status))
@@ -124,11 +131,28 @@ def _build_graph():
         route_after_aggregate,
         {"judge_score": "judge_score", "finalize": "finalize"},
     )
-    graph.add_edge("judge_score", "observer_analyze")
+    graph.add_conditional_edges(
+        "judge_score",
+        route_after_judge,
+        {
+            "consolidate_chapter_notes": "consolidate_chapter_notes",
+            "observer_analyze": "observer_analyze",
+            "finalize": "finalize",
+        },
+    )
+    graph.add_conditional_edges(
+        "consolidate_chapter_notes",
+        route_after_consolidate,
+        {"observer_analyze": "observer_analyze", "finalize": "finalize"},
+    )
     graph.add_conditional_edges(
         "observer_analyze",
         macro_router,
-        {"refine_material": "refine_material", "finalize": "finalize"},
+        {
+            "refine_material": "refine_material",
+            "generate_material": "generate_material",
+            "finalize": "finalize",
+        },
     )
 
     graph.add_edge("refine_material", "student_study")

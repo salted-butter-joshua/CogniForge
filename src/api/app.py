@@ -12,9 +12,19 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.job_manager import job_manager
-from src.api.models import RunCreateResponse, RunParams, RunSummary
+from src.api.models import (
+    CrawlPreviewRequest,
+    CrawlPreviewResponse,
+    CrawlPreviewSeed,
+    RunCreateResponse,
+    RunParams,
+    RunSummary,
+)
 from src.api.param_schema import get_param_schema
 from src.api.run_service import list_summaries, load_summary, reconcile_stale_runs
+from src.config import get_settings
+from src.models.router import validate_api_keys
+from src.tools.web_fetch import probe_crawl_urls
 
 app = FastAPI(
     title="CogniForge Console API",
@@ -38,12 +48,41 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "active_run": job_manager.active_run_id}
+    ok, err = validate_api_keys(get_settings())
+    return {
+        "status": "ok",
+        "active_run": job_manager.active_run_id,
+        "api_keys_ok": ok,
+        "api_keys_hint": err if not ok else "",
+    }
 
 
 @app.get("/api/config/schema")
 def config_schema():
     return get_param_schema()
+
+
+@app.post("/api/crawl/preview", response_model=CrawlPreviewResponse)
+def crawl_preview(body: CrawlPreviewRequest) -> CrawlPreviewResponse:
+    """Probe seed URL(s) for discoverable page count without fetching leaf content."""
+    urls = [u.strip() for u in body.urls if u.strip()]
+    if not urls:
+        raise HTTPException(400, "At least one URL required")
+    raw = probe_crawl_urls(urls, crawl_enabled=body.crawl_enabled)
+    seeds = [CrawlPreviewSeed.model_validate(s) for s in raw.get("seeds") or []]
+    return CrawlPreviewResponse(
+        seeds=seeds,
+        discovered_total=int(raw.get("discovered_total") or 0),
+        crawl_enabled=body.crawl_enabled,
+    )
+
+
+@app.get("/api/runs/active", response_model=RunSummary | None)
+def get_active_run() -> RunSummary | None:
+    run_id = job_manager.active_run_id
+    if not run_id:
+        return None
+    return load_summary(run_id)
 
 
 @app.get("/api/runs", response_model=list[RunSummary])

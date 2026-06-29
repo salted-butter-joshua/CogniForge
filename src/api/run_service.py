@@ -29,6 +29,7 @@ from src.logging_config import (
 from src.main import build_initial_state
 from src.models.router import llm_runtime_info, validate_api_keys
 from src.tools.token_tracker import tracker as token_tracker
+from src.tools.learning_policy import mastery_progress_summary
 
 logger = get_loop_logger()
 
@@ -99,6 +100,15 @@ def _apply_env_overrides(params: RunParams) -> None:
         "CURRICULUM_PAGES_PER_ROUND": str(params.curriculum_pages_per_round),
         "JUDGE_EVIDENCE_ONLY": "1" if params.judge_evidence_only else "0",
         "EVIDENCE_CAP_SCORE": str(params.evidence_cap_score),
+        "LEARNING_MODE": (
+            "chapter_mastery" if params.use_chapter_mastery else "page_curriculum"
+        ),
+        "CHAPTER_MASTERY_ACCURACY": str(params.chapter_mastery_accuracy),
+        "SHORT_TERM_NOTES_MAX_CHARS": str(params.short_term_notes_max_chars),
+        "LONG_TERM_NOTES_MAX_CHARS": str(params.long_term_notes_max_chars),
+        "CHAPTER_REVIEW_RATIO": str(params.chapter_review_ratio),
+        "EXAM_LONG_TERM_RATIO": str(params.exam_long_term_ratio),
+        "EXAM_WORKING_LAYER_RATIO": str(params.exam_working_layer_ratio),
         "CRAWL_ENABLED": "1" if params.crawl_enabled else "0",
         "CRAWL_MAX_PAGES": str(params.crawl_max_pages),
         "CRAWL_INCLUDE_IMAGES": "1" if params.crawl_include_images else "0",
@@ -108,6 +118,14 @@ def _apply_env_overrides(params: RunParams) -> None:
     }
     os.environ.update(mapping)
     get_settings.cache_clear()
+
+
+def _chapter_progress(state: dict) -> list[dict]:
+    registry = state.get("chapter_registry") or []
+    mastery = state.get("chapter_mastery") or {}
+    if not registry:
+        return []
+    return mastery_progress_summary(registry, mastery)
 
 
 def _build_init_state(params: RunParams, task_id: str) -> dict:
@@ -240,6 +258,10 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                     "current_questions": q_count,
                     "accuracy_history": history,
                     "round_records": list(state.get("round_records") or []),
+                    "chapter_mastery": dict(state.get("chapter_mastery") or {}),
+                    "chapter_progress": _chapter_progress(state),
+                    "current_chapter_index": int(state.get("current_chapter_index", 0) or 0),
+                    "learning_mode": get_settings().learning_mode,
                     "weak_topics": list(state.get("weak_topics") or []),
                     "phase": phase,
                     **token_tracker.snapshot(),
@@ -257,6 +279,9 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
                 "current_questions": _questions_in_state(partial),
                 "accuracy_history": list(partial.get("accuracy_history") or []),
                 "round_records": list(partial.get("round_records") or []),
+                "chapter_mastery": dict(partial.get("chapter_mastery") or {}),
+                "chapter_progress": _chapter_progress(partial),
+                "current_chapter_index": int(partial.get("current_chapter_index", 0) or 0),
                 "weak_topics": list(partial.get("weak_topics") or []),
                 "phase": str(partial.get("phase", "")),
                 "error_message": "用户通过控制台停止",
@@ -299,6 +324,10 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
             "current_questions": _questions_in_state(result),
             "accuracy_history": list(result.get("accuracy_history") or []),
             "round_records": list(result.get("round_records") or []),
+            "chapter_mastery": dict(result.get("chapter_mastery") or {}),
+            "chapter_progress": _chapter_progress(result),
+            "current_chapter_index": int(result.get("current_chapter_index", 0) or 0),
+            "learning_mode": get_settings().learning_mode,
             "weak_topics": list(result.get("weak_topics") or []),
             "phase": str(result.get("phase", "")),
             "error_message": str(result.get("error_message", "")),

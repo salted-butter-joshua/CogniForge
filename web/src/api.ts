@@ -1,10 +1,37 @@
-import type { ParamSchema, RunSummary } from "./types";
+import type { CrawlPreview, ParamSchema, RunSummary } from "./types";
 
 const API = "/api";
+
+export async function fetchHealth(): Promise<{
+  status: string;
+  active_run?: string | null;
+  api_keys_ok?: boolean;
+  api_keys_hint?: string;
+}> {
+  const r = await fetch(`${API}/health`);
+  if (!r.ok) throw new Error("API health check failed");
+  return r.json();
+}
 
 export async function fetchSchema(): Promise<ParamSchema> {
   const r = await fetch(`${API}/config/schema`);
   if (!r.ok) throw new Error("Failed to load config schema");
+  return r.json();
+}
+
+export async function previewCrawl(
+  urls: string[],
+  crawlEnabled: boolean
+): Promise<CrawlPreview> {
+  const r = await fetch(`${API}/crawl/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls, crawl_enabled: crawlEnabled }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || "链接探测失败");
+  }
   return r.json();
 }
 

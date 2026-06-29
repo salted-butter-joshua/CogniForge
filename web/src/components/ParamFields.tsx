@@ -10,14 +10,22 @@ interface Props {
 export default function ParamFields({ fields, values, onChange, disabled }: Props) {
   const groups = [...new Set(fields.map((f) => f.group))];
 
+  const visible = (field: ParamField) => {
+    if (!field.visible_when_key) return true;
+    return values[field.visible_when_key] === field.visible_when_equals;
+  };
+
   return (
     <>
-      {groups.map((group) => (
+      {groups.map((group) => {
+        const groupFields = fields.filter(
+          (f) => f.group === group && f.key !== "goal" && visible(f)
+        );
+        if (groupFields.length === 0) return null;
+        return (
         <div key={group}>
           <div className="param-group-title">{group}</div>
-          {fields
-            .filter((f) => f.group === group && f.key !== "goal")
-            .map((field) => (
+          {groupFields.map((field) => (
               <Field
                 key={field.key}
                 field={field}
@@ -27,7 +35,8 @@ export default function ParamFields({ fields, values, onChange, disabled }: Prop
               />
             ))}
         </div>
-      ))}
+        );
+      })}
     </>
   );
 }

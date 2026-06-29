@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from src.config import load_personas
+from src.config import get_settings, load_personas
 
 _PERSONA_WEIGHTS: dict[str, float] | None = None
 
@@ -349,3 +349,502 @@ def build_observer_qa_payload(qa_list: list[dict], *, max_items: int = 40) -> di
         "wrong_count": len(wrong),
         "sample": items,
     }
+
+
+# ---------------------------------------------------------------------------
+# Chapter mastery mode + memory helpers (P0–P3)
+# ---------------------------------------------------------------------------
+
+
+def is_chapter_mastery_mode() -> bool:
+    return get_settings().learning_mode.strip().lower() == "chapter_mastery"
+
+
+def init_chapter_mastery_dict(registry: list[dict]) -> dict[str, dict]:
+    mastery: dict[str, dict] = {}
+    for ch in registry:
+        cid = ch.get("chapter_id", "")
+        if not cid:
+            continue
+        mastery[cid] = {
+            "chapter_id": cid,
+            "chapter_title": ch.get("chapter_title", ""),
+            "accuracy": 0.0,
+            "best_accuracy": 0.0,
+            "attempts": 0,
+            "mastered": False,
+            "mastered_at_iter": -1,
+            "weak_subtopics": [],
+        }
+    return mastery
+
+
+def current_chapter(registry: list[dict], index: int) -> dict | None:
+    if not registry or index < 0 or index >= len(registry):
+        return None
+    return registry[index]
+
+
+def chunks_for_chapter(chunks: list[dict], chapter_id: str) -> list[dict]:
+    return [c for c in chunks if c.get("chapter_id") == chapter_id]
+
+
+def chunks_for_exam(
+    chunks: list[dict],
+    registry: list[dict],
+    chapter_index: int,
+    chapter_mastery: dict[str, dict],
+    *,
+    review_ratio: float = 0.1,
+) -> list[dict]:
+    """Current chapter chunks + optional review chunks from mastered chapters."""
+    ch = current_chapter(registry, chapter_index)
+    if not ch:
+        return filter_content_chunks(chunks)
+    primary = chunks_for_chapter(chunks, ch["chapter_id"])
+    if review_ratio <= 0:
+        return primary or filter_content_chunks(chunks)
+
+    mastered_ids = [
+        cid
+        for cid, m in chapter_mastery.items()
+        if m.get("mastered") and cid != ch.get("chapter_id")
+    ]
+    if not mastered_ids:
+        return primary
+
+    review_cap = max(1, int(len(primary) * review_ratio)) if primary else 1
+    review: list[dict] = []
+    for cid in mastered_ids:
+        review.extend(chunks_for_chapter(chunks, cid)[:1])
+        if len(review) >= review_cap:
+            break
+    return primary + review
+
+
+def chapter_label(registry: list[dict], index: int) -> str:
+    ch = current_chapter(registry, index)
+    if not ch:
+        return "（无章节）"
+    total = len(registry)
+    return f"第 {index + 1}/{total} 章：{ch.get('chapter_title', '')}"
+
+
+def _split_markdown_sections(text: str) -> list[str]:
+    parts = re.split(r"(?=^#{1,4}\s)", text.strip(), flags=re.MULTILINE)
+    return [p.strip() for p in parts if p.strip()]
+
+
+# Sections from working notes allowed at closed-book exam (shallow reference layer).
+WORKING_EXAM_SECTION_HINTS: tuple[str, ...] = (
+    "自测",
+    "易错",
+    "易混淆",
+    "待澄清",
+    "薄弱",
+    "术语",
+    "口诀",
+    "对比",
+    "参考层",
+)
+
+
+def extract_working_exam_layer(notes: str, max_chars: int) -> str:
+    """Extract shallow reference snippets from working notes — not the full manual."""
+    notes = (notes or "").strip()
+    if not notes or max_chars <= 0:
+        return ""
+
+    sections = _split_markdown_sections(notes)
+    picked: list[str] = []
+    for sec in sections:
+        header = sec.split("\n", 1)[0].lower()
+        if any(hint in header for hint in WORKING_EXAM_SECTION_HINTS):
+            picked.append(sec)
+
+    if not picked:
+        # Fallback: bullet lists only (typically cues, not full exposition)
+        bullets = [
+            ln
+            for ln in notes.splitlines()
+            if ln.strip().startswith(("-", "*", "1.", "2."))
+        ]
+        if bullets:
+            picked = ["\n".join(bullets[:12])]
+
+    if not picked:
+        return ""
+
+    text = _truncate_sections("\n\n".join(picked), max_chars)
+    return text
+
+
+def append_chapter_archive(
+    archive: list[dict],
+    chapter: dict,
+    full_notes: str,
+    *,
+    macro_iter: int,
+) -> list[dict]:
+    """Persist full chapter working notes for display / learning journal."""
+    if not full_notes.strip():
+        return list(archive)
+    cid = chapter.get("chapter_id", "")
+    entry = {
+        "chapter_id": cid,
+        "chapter_title": chapter.get("chapter_title", ""),
+        "part_title": chapter.get("part_title", ""),
+        "chapter_order": chapter.get("chapter_order", 0),
+        "macro_iter": macro_iter,
+        "full_notes": full_notes.strip(),
+    }
+    updated = [e for e in archive if e.get("chapter_id") != cid]
+    updated.append(entry)
+    updated.sort(key=lambda e: int(e.get("chapter_order") or 0))
+    return updated
+
+
+def build_learning_journal(
+    archive: list[dict],
+    *,
+    goal: str = "",
+    in_progress_chapter: dict | None = None,
+    in_progress_notes: str = "",
+) -> str:
+    """Aggregate full study notes across chapters for human-readable output."""
+    lines = ["# 学习全过程笔记", ""]
+    if goal:
+        lines.extend([f"> **学习目标**：{goal}", ""])
+    lines.append(
+        "> 说明：本文件为学习阶段的完整工作笔记归档；"
+        "闭卷考试时仅使用「长期记忆摘要」+「工作记忆参考层（术语/易错/自测）」，"
+        "不得查阅本文件全文。"
+    )
+    lines.append("")
+
+    for entry in archive:
+        title = entry.get("chapter_title") or entry.get("chapter_id") or "未命名章节"
+        part = entry.get("part_title") or ""
+        lines.append(f"## {title}")
+        if part:
+            lines.append(f"*{part}* · 已于第 {int(entry.get('macro_iter', 0)) + 1} 轮掌握")
+        lines.append("")
+        lines.append(entry.get("full_notes", ""))
+        lines.append("")
+
+    if in_progress_notes.strip() and in_progress_chapter:
+        title = in_progress_chapter.get("chapter_title", "当前章节")
+        part = in_progress_chapter.get("part_title", "")
+        lines.append(f"## {title}（进行中）")
+        if part:
+            lines.append(f"*{part}*")
+        lines.append("")
+        lines.append(in_progress_notes.strip())
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _truncate_sections(text: str, max_chars: int) -> str:
+    """Section-aware truncation: preserve headings, avoid head-only cut."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    sections = _split_markdown_sections(text)
+    if len(sections) <= 1:
+        head = max_chars * 2 // 3
+        tail = max(max_chars - head - 24, 0)
+        if tail <= 0:
+            return text[:max_chars]
+        return text[:head] + "\n\n…（中间省略）\n\n" + text[-tail:]
+
+    kept: list[str] = []
+    total = 0
+    per = max(max_chars // len(sections), 120)
+    for sec in sections:
+        header = sec.split("\n", 1)[0]
+        body = sec[len(header) :].strip()
+        body_budget = max(per - len(header) - 2, 80)
+        snippet = header
+        if body:
+            snippet += "\n" + (
+                body if len(body) <= body_budget else body[: body_budget - 3] + "…"
+            )
+        if total + len(snippet) + 2 > max_chars:
+            break
+        kept.append(snippet)
+        total += len(snippet) + 2
+    if not kept:
+        return text[:max_chars]
+    return "\n\n".join(kept)
+
+
+def select_exam_notes(
+    *,
+    notes: str = "",
+    max_chars: int,
+    long_term_notes: str = "",
+    short_term_notes: str = "",
+    chapter_title: str = "",
+) -> str:
+    """Closed-book memory bundle: deep (long-term) + shallow (working layer only).
+
+    Full working notes and learning journal are NOT included — those are for
+    study/archive only, matching human memory: internalized vs cheat-sheet cues.
+    """
+    settings = get_settings()
+    lt_ratio = min(max(settings.exam_long_term_ratio, 0.0), 0.9)
+    wl_ratio = min(max(settings.exam_working_layer_ratio, 0.0), 0.5)
+    if lt_ratio + wl_ratio > 0.95:
+        wl_ratio = max(0.05, 0.95 - lt_ratio)
+
+    lt_budget = int(max_chars * lt_ratio)
+    wl_budget = int(max_chars * wl_ratio)
+    parts: list[str] = []
+
+    if long_term_notes.strip() and lt_budget > 120:
+        chunk = _truncate_sections(long_term_notes.strip(), lt_budget)
+        parts.append(f"【长期记忆·内化知识】\n{chunk}")
+
+    if short_term_notes.strip() and wl_budget > 80:
+        layer = extract_working_exam_layer(short_term_notes, wl_budget)
+        if layer:
+            label = (
+                f"【工作记忆·参考层（术语/易错/自测，非完整笔记）·{chapter_title}】"
+                if chapter_title
+                else "【工作记忆·参考层（术语/易错/自测，非完整笔记）】"
+            )
+            parts.append(f"{label}\n{layer}")
+
+    if not parts and is_chapter_mastery_mode():
+        return (
+            "（尚无可用记忆：请继续学习本章并整理笔记。"
+            "闭卷时只能依赖已内化的长期记忆与少量参考层摘录。）"
+        )
+
+    if not parts and notes.strip():
+        parts.append(_truncate_sections(notes.strip(), max_chars))
+
+    preamble = (
+        "【闭卷记忆规则】\n"
+        "1. 「长期记忆」= 已内化、可回忆的核心概念（答题主要依据）\n"
+        "2. 「工作记忆·参考层」= 术语/易错/自测等浅层线索（辅助，非完整笔记）\n"
+        "3. 完整手抄笔记与原文不在考场上可用；记不清请说「不确定」"
+    )
+    body = "\n\n".join(parts).strip()
+    text = f"{preamble}\n\n{body}".strip()
+    if len(text) > max_chars:
+        overflow = len(text) - max_chars
+        if body and overflow > 0:
+            trimmed_body = body[: max(len(body) - overflow - 3, 80)] + "…"
+            text = f"{preamble}\n\n{trimmed_body}"
+        else:
+            text = text[: max_chars - 12] + "\n…（记忆截断）"
+    return text or "（尚无笔记）"
+
+
+def exam_notes_char_budget() -> int:
+    """Total closed-book memory budget (NOT equal to full study notes)."""
+    return get_settings().student_notes_max_chars
+
+
+def format_wrong_qa_feedback(qa_list: list[dict], *, max_items: int = 8) -> str:
+    """Summarize wrong answers from the last exam for targeted study."""
+    wrong = [q for q in qa_list if not q.get("is_correct")]
+    if not wrong:
+        return ""
+    lines = ["## 上轮错题（请在笔记中重点补强）"]
+    for q in wrong[:max_items]:
+        topic = q.get("topic_tag") or q.get("weak_topic_focus") or "未分类"
+        reason = (q.get("judge_reason") or "").strip()[:120]
+        lines.append(
+            f"- **{topic}**：{q.get('question', '')[:160]}\n"
+            f"  - 你的回答：{(q.get('answer') or '')[:120]}\n"
+            f"  - 失分原因：{reason or '未记录'}"
+        )
+    if len(wrong) > max_items:
+        lines.append(f"- …另有 {len(wrong) - max_items} 道错题")
+    return "\n".join(lines)
+
+
+def _question_fingerprint(text: str) -> str:
+    import hashlib
+
+    toks = sorted(re.findall(r"[\w\u4e00-\u9fff]{2,}", (text or "").lower()))
+    raw = " ".join(toks[:40]).encode()
+    return hashlib.md5(raw).hexdigest()[:10]
+
+
+def update_reinforce_pool(
+    pool: list[dict],
+    scored: list[dict],
+    *,
+    max_size: int = 20,
+) -> list[dict]:
+    """Keep wrong questions for re-test; drop items answered correctly on retry."""
+    by_fp = {_question_fingerprint(item.get("question", "")): dict(item) for item in pool}
+    for qa in scored:
+        fp = _question_fingerprint(qa.get("question", ""))
+        if qa.get("is_reinforce") and qa.get("is_correct"):
+            by_fp.pop(fp, None)
+            continue
+        if qa.get("is_correct"):
+            continue
+        by_fp[fp] = {
+            "question": qa.get("question", ""),
+            "evidence_refs": list(qa.get("evidence_refs") or []),
+            "topic_tag": qa.get("topic_tag", ""),
+            "weak_topic_focus": qa.get("weak_topic_focus", ""),
+            "persona_id": qa.get("persona_id", "reinforce"),
+            "persona_name": qa.get("persona_name", "巩固复测"),
+            "is_reinforce": True,
+        }
+    ordered = list(by_fp.values())
+    return ordered[-max_size:]
+
+
+def build_chapter_study_context(
+    *,
+    raw_chunks: list[dict],
+    chapter_registry: list[dict],
+    current_chapter_index: int,
+    study_material: str,
+    long_term_notes: str,
+    short_term_notes: str,
+    max_chars: int,
+) -> str:
+    """Sliding window: long-term summaries + prior short-term notes + current chapter."""
+    ch = current_chapter(chapter_registry, current_chapter_index)
+    if not ch:
+        return build_study_context(
+            raw_chunks=raw_chunks,
+            study_material=study_material,
+            curriculum_level=0,
+            pages_per_round=max(1, len(chapter_registry)),
+            max_chars=max_chars,
+        )
+
+    current_chunks = chunks_for_chapter(raw_chunks, ch["chapter_id"])
+    chunk_budget = max(max_chars * 2 // 3, 1000)
+    from src.tools.web_fetch import material_context
+
+    chunk_text = material_context(current_chunks, max_chars=chunk_budget)
+    material_budget = max(max_chars - len(chunk_text) - 400, 400)
+    material_excerpt = (study_material or "").strip()[:material_budget]
+
+    lt_budget = min(800, max_chars // 5)
+    st_budget = min(1200, max_chars // 4)
+    lt = _truncate_sections(long_term_notes or "", lt_budget)
+    st = _truncate_sections(short_term_notes or "", st_budget)
+
+    parts = [
+        f"【当前章节】{chapter_label(chapter_registry, current_chapter_index)}。"
+        "请只学习本章内容，不要超前。",
+    ]
+    if lt:
+        parts.append(f"## 长期记忆（已掌握章节摘要）\n{lt}")
+    if st:
+        parts.append(f"## 短期记忆（上轮本章笔记，请在此基础上增量完善）\n{st}")
+    if material_excerpt:
+        parts.append(f"## 本章整理资料\n{material_excerpt}")
+    parts.append(f"## 本章原文\n{chunk_text}")
+
+    text = "\n\n".join(parts)
+    if len(text) > max_chars:
+        return text[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
+    return text
+
+
+def chapter_exam_accuracy(
+    scored: list[dict],
+    chapter_id: str,
+    chunks: list[dict],
+) -> float:
+    """Weighted accuracy for questions whose evidence belongs to the chapter."""
+    chunk_ids = {c["id"] for c in chunks if c.get("chapter_id") == chapter_id}
+    if not chunk_ids:
+        return weighted_accuracy(scored)
+    relevant = [
+        q
+        for q in scored
+        if chunk_ids.intersection(set(q.get("evidence_refs") or []))
+    ]
+    return weighted_accuracy(relevant) if relevant else 0.0
+
+
+def maybe_advance_chapter(
+    current_index: int,
+    chapter_accuracy: float,
+    registry: list[dict],
+    *,
+    threshold: float,
+    already_mastered: bool,
+) -> tuple[int, bool]:
+    """Return (index, should_consolidate). Index advances after consolidate."""
+    if already_mastered:
+        return current_index, False
+    if chapter_accuracy < threshold:
+        return current_index, False
+    if current_index >= len(registry):
+        return current_index, False
+    return current_index, True
+
+
+def all_chapters_mastered(
+    registry: list[dict],
+    chapter_mastery: dict[str, dict],
+) -> bool:
+    if not registry:
+        return False
+    for ch in registry:
+        cid = ch.get("chapter_id", "")
+        rec = chapter_mastery.get(cid) or {}
+        if not rec.get("mastered"):
+            return False
+    return True
+
+
+def update_chapter_mastery_record(
+    mastery: dict[str, dict],
+    chapter_id: str,
+    *,
+    accuracy: float,
+    macro_iter: int,
+    weak_subtopics: list[str],
+    threshold: float,
+) -> dict[str, dict]:
+    """Return updated mastery dict for one chapter."""
+    updated = dict(mastery)
+    rec = dict(updated.get(chapter_id) or {})
+    rec["accuracy"] = accuracy
+    rec["best_accuracy"] = max(float(rec.get("best_accuracy", 0.0)), accuracy)
+    rec["attempts"] = int(rec.get("attempts", 0)) + 1
+    rec["weak_subtopics"] = weak_subtopics[:6]
+    if accuracy >= threshold and not rec.get("mastered"):
+        rec["mastered"] = True
+        rec["mastered_at_iter"] = macro_iter
+    updated[chapter_id] = rec
+    return updated
+
+
+def mastery_progress_summary(
+    registry: list[dict],
+    chapter_mastery: dict[str, dict],
+) -> list[dict]:
+    """UI-friendly chapter progress list."""
+    rows: list[dict] = []
+    for i, ch in enumerate(registry):
+        cid = ch.get("chapter_id", "")
+        rec = chapter_mastery.get(cid) or {}
+        rows.append(
+            {
+                "chapter_id": cid,
+                "chapter_title": ch.get("chapter_title", ""),
+                "chapter_index": i,
+                "mastered": bool(rec.get("mastered")),
+                "accuracy": float(rec.get("accuracy", 0.0)),
+                "best_accuracy": float(rec.get("best_accuracy", 0.0)),
+                "attempts": int(rec.get("attempts", 0)),
+            }
+        )
+    return rows

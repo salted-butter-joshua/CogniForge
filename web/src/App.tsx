@@ -10,8 +10,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  fetchHealth,
   fetchSchema,
   getRun,
+  listRuns,
+  previewCrawl,
   startRun,
   stopRun,
   subscribeEvents,
@@ -21,10 +24,19 @@ import LearningCurve from "./components/LearningCurve";
 import LogViewer from "./components/LogViewer";
 import ParamFields from "./components/ParamFields";
 import PipelineProgress from "./components/PipelineProgress";
+import RunHistoryPanel from "./components/RunHistoryPanel";
 import TimingPanel from "./components/TimingPanel";
 import { useTiming } from "./hooks/useTiming";
-import type { ParamPreset, RunEvent, RunSummary, TabId } from "./types";
+import type { CrawlPreview, ParamPreset, RunEvent, RunSummary, TabId } from "./types";
 import { formatDuration } from "./utils/format";
+import {
+  clearActiveRunId,
+  isTerminalStatus,
+  loadActiveRunId,
+  loadActiveTab,
+  saveActiveRunId,
+  saveActiveTab,
+} from "./utils/runSession";
 
 const DEFAULT_URLS = "https://docs.python.org/3/tutorial/index.html";
 
@@ -43,21 +55,162 @@ export default function App() {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [apiKeysError, setApiKeysError] = useState<string | null>(null);
+  const [crawlPreview, setCrawlPreview] = useState<CrawlPreview | null>(null);
+  const [crawlPreviewLoading, setCrawlPreviewLoading] = useState(false);
+  const [crawlPreviewError, setCrawlPreviewError] = useState<string | null>(null);
+  const [crawlMaxPagesTouched, setCrawlMaxPagesTouched] = useState(false);
+  const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
+  const [runHistoryLoading, setRunHistoryLoading] = useState(true);
+
+  const refreshRunHistory = useCallback(async () => {
+    setRunHistoryLoading(true);
+    try {
+      const data = await listRuns();
+      setRunHistory(data);
+      return data;
+    } catch {
+      return [];
+    } finally {
+      setRunHistoryLoading(false);
+    }
+  }, []);
+
+  const selectRun = useCallback(
+    async (run: RunSummary, opts?: { switchTab?: TabId }) => {
+      setActiveRunId(run.run_id);
+      setActiveSummary(run);
+      saveActiveRunId(run.run_id);
+      if (opts?.switchTab) {
+        setTab(opts.switchTab);
+        saveActiveTab(opts.switchTab);
+      }
+      try {
+        const fresh = await getRun(run.run_id);
+        setActiveSummary(fresh);
+        if (isTerminalStatus(fresh.status)) {
+          clearActiveRunId();
+        }
+      } catch {
+        /* keep cached summary */
+      }
+    },
+    []
+  );
+
+  const restoreSession = useCallback(async () => {
+    const runs = await refreshRunHistory();
+    let health: Awaited<ReturnType<typeof fetchHealth>> | null = null;
+    try {
+      health = await fetchHealth();
+    } catch {
+      /* API down — schema effect will show error */
+    }
+
+    const storedId = loadActiveRunId();
+    const candidate =
+      (health?.active_run && runs.some((r) => r.run_id === health.active_run)
+        ? health.active_run
+        : null) ||
+      (storedId && runs.some((r) => r.run_id === storedId) ? storedId : null) ||
+      runs[0]?.run_id;
+
+    if (!candidate) return;
+
+    try {
+      const summary = await getRun(candidate);
+      setActiveRunId(candidate);
+      setActiveSummary(summary);
+      saveActiveRunId(candidate);
+      const savedTab = loadActiveTab() as TabId | null;
+      const validTabs: TabId[] = ["launch", "logs", "curve", "compare"];
+      if (savedTab && validTabs.includes(savedTab)) {
+        setTab(savedTab);
+      } else if (summary.status === "running") {
+        setTab("logs");
+        saveActiveTab("logs");
+      }
+      if (isTerminalStatus(summary.status)) {
+        clearActiveRunId();
+      }
+    } catch {
+      /* ignore stale session */
+      clearActiveRunId();
+    }
+  }, [refreshRunHistory]);
 
   useEffect(() => {
-    fetchSchema().then((schema) => {
-      setFields(schema.fields);
-      setPresets(schema.presets ?? []);
-      setActivePreset(schema.default_preset ?? "development");
-      const defaults: Record<string, unknown> = {};
-      for (const f of schema.fields) {
-        defaults[f.key] = f.default;
-      }
-      setParams(defaults);
-      const goalField = schema.fields.find((f) => f.key === "goal");
-      if (goalField) setGoal(String(goalField.default));
-    });
-  }, []);
+    fetchHealth()
+      .then((h) => {
+        if (h.api_keys_ok === false) {
+          setApiKeysError(
+            h.api_keys_hint ||
+              "未配置 LLM API Key。请在项目根目录创建 .env 并设置 MINIMAX_API_KEY（或其他提供商 Key），然后重启 API 服务。"
+          );
+        } else {
+          setApiKeysError(null);
+        }
+      })
+      .catch(() => {
+        /* schema fetch will surface connection errors */
+      });
+
+    fetchSchema()
+      .then((schema) => {
+        setSchemaError(null);
+        setFields(schema.fields);
+        setPresets(schema.presets ?? []);
+        setActivePreset(schema.default_preset ?? "development");
+        const defaults: Record<string, unknown> = {};
+        for (const f of schema.fields) {
+          defaults[f.key] = f.default;
+        }
+        setParams(defaults);
+        const goalField = schema.fields.find((f) => f.key === "goal");
+        if (goalField) setGoal(String(goalField.default));
+      })
+      .catch((e) => {
+        setSchemaError(
+          e instanceof Error
+            ? e.message
+            : "无法加载参数配置，请确认 API 已启动（http://127.0.0.1:8080/api/health）"
+        );
+      });
+    restoreSession();
+  }, [restoreSession]);
+
+  useEffect(() => {
+    const urls = urlsText
+      .split(/[\n,]+/)
+      .map((u) => u.trim())
+      .filter(Boolean);
+    if (!urls.length) {
+      setCrawlPreview(null);
+      setCrawlPreviewError(null);
+      return;
+    }
+    const crawlEnabled = Boolean(params.crawl_enabled ?? true);
+    const timer = window.setTimeout(() => {
+      setCrawlPreviewLoading(true);
+      setCrawlPreviewError(null);
+      previewCrawl(urls, crawlEnabled)
+        .then((preview) => {
+          setCrawlPreview(preview);
+          if (!crawlMaxPagesTouched && (params.crawl_max_pages === 0 || params.crawl_max_pages == null)) {
+            setParams((p) => ({ ...p, crawl_max_pages: preview.discovered_total }));
+          }
+        })
+        .catch((e) => {
+          setCrawlPreview(null);
+          setCrawlPreviewError(
+            e instanceof Error ? e.message : "无法探测链接结构"
+          );
+        })
+        .finally(() => setCrawlPreviewLoading(false));
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [urlsText, params.crawl_enabled, crawlMaxPagesTouched]);
 
   const isRunning = activeSummary?.status === "running";
 
@@ -78,33 +231,56 @@ export default function App() {
       if (e.type === "_eof") return;
       if (e.type === "snapshot" && e.summary) {
         setActiveSummary(e.summary);
+        if (isTerminalStatus(e.summary.status)) {
+          clearActiveRunId();
+          refreshRunHistory();
+        }
         return;
       }
       if (e.type === "run_end") {
         if (activeRunId) {
-          getRun(activeRunId).then(setActiveSummary).catch(() => {});
+          getRun(activeRunId)
+            .then((s) => {
+              setActiveSummary(s);
+              clearActiveRunId();
+              refreshRunHistory();
+            })
+            .catch(() => {});
         }
         return;
       }
       setEvents((prev) => [...prev.slice(-4000), e]);
     },
-    [activeRunId]
+    [activeRunId, refreshRunHistory]
   );
+
+  useEffect(() => {
+    saveActiveTab(tab);
+  }, [tab]);
 
   useEffect(() => {
     if (!activeRunId) return;
     const unsub = subscribeEvents(activeRunId, handleEvent);
     const poll = setInterval(() => {
-      getRun(activeRunId).then(setActiveSummary).catch(() => {});
+      getRun(activeRunId)
+        .then((s) => {
+          setActiveSummary(s);
+          if (isTerminalStatus(s.status)) {
+            clearActiveRunId();
+            refreshRunHistory();
+          }
+        })
+        .catch(() => {});
     }, 5000);
     return () => {
       unsub();
       clearInterval(poll);
     };
-  }, [activeRunId, handleEvent]);
+  }, [activeRunId, handleEvent, refreshRunHistory]);
 
   const applyPreset = (preset: ParamPreset) => {
     setActivePreset(preset.id);
+    setCrawlMaxPagesTouched(false);
     setParams((p) => ({ ...p, ...preset.values }));
   };
 
@@ -126,10 +302,13 @@ export default function App() {
         label: label || `run-${Date.now().toString(36)}`,
       };
       const { run_id } = await startRun(body);
+      saveActiveRunId(run_id);
       setActiveRunId(run_id);
       const summary = await getRun(run_id);
       setActiveSummary(summary);
+      await refreshRunHistory();
       setTab("logs");
+      saveActiveTab("logs");
     } catch (e) {
       setError(e instanceof Error ? e.message : "启动失败");
     } finally {
@@ -147,6 +326,9 @@ export default function App() {
   };
 
   const setParam = (key: string, value: unknown) => {
+    if (key === "crawl_max_pages") {
+      setCrawlMaxPagesTouched(true);
+    }
     setParams((p) => ({ ...p, [key]: value }));
   };
 
@@ -219,6 +401,16 @@ export default function App() {
             <span>{formatDuration(timing.runElapsedMs)}</span>
           </div>
         )}
+        <RunHistoryPanel
+          runs={runHistory}
+          activeRunId={activeRunId}
+          loading={runHistoryLoading}
+          onSelect={(run) =>
+            selectRun(run, {
+              switchTab: run.status === "running" ? "logs" : "curve",
+            })
+          }
+        />
         <div className="sidebar-footer">
           认知闭环引擎
           <br />
@@ -249,6 +441,16 @@ export default function App() {
           )}
         </header>
 
+        {apiKeysError && (
+          <div className="alert alert-error">
+            <strong>无法运行学习任务：</strong> {apiKeysError}
+            <div style={{ marginTop: 8, fontSize: "0.9rem", opacity: 0.9 }}>
+              在项目根目录执行：<code>copy .env.example .env</code>，填入 Key 后重启{" "}
+              <code>python -m src.api.server</code>
+            </div>
+          </div>
+        )}
+        {schemaError && <div className="alert alert-error">{schemaError}</div>}
         {error && <div className="alert alert-error">{error}</div>}
 
         {tab === "launch" && (
@@ -265,9 +467,74 @@ export default function App() {
                     <textarea
                       value={urlsText}
                       disabled={isRunning}
-                      onChange={(e) => setUrlsText(e.target.value)}
+                      onChange={(e) => {
+                        setCrawlMaxPagesTouched(false);
+                        setUrlsText(e.target.value);
+                      }}
                       placeholder="每行一个或逗号分隔"
                     />
+                    {crawlPreviewLoading && (
+                      <div className="field-hint">正在探测链接结构…</div>
+                    )}
+                    {crawlPreviewError && (
+                      <div className="field-hint" style={{ color: "var(--danger, #c0392b)" }}>
+                        {crawlPreviewError}
+                      </div>
+                    )}
+                    {crawlPreview && !crawlPreviewLoading && (
+                      <div className="field-hint">
+                        {crawlPreview.seeds.map((seed) => (
+                          <div key={seed.url}>
+                            {seed.error ? (
+                              <span>
+                                {seed.url}：探测失败（{seed.error}）
+                              </span>
+                            ) : (
+                              <span>
+                                {seed.url}：发现{" "}
+                                <strong>{seed.discovered_total}</strong>{" "}
+                                {seed.curriculum_mode === "handbook_toc"
+                                  ? "个小节（手册目录）"
+                                  : "个页面"}
+                                {seed.parts.length > 0 &&
+                                  ` · ${seed.parts.length} 个 Part`}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                        {crawlPreview.discovered_total > 0 && (
+                          <div style={{ marginTop: 6 }}>
+                            合计 {crawlPreview.discovered_total} 页；
+                            当前设置抓取{" "}
+                            <strong>
+                              {(params.crawl_max_pages as number) === 0
+                                ? crawlPreview.discovered_total
+                                : Math.min(
+                                    Number(params.crawl_max_pages) || 0,
+                                    crawlPreview.discovered_total
+                                  )}
+                            </strong>{" "}
+                            页
+                            {!crawlMaxPagesTouched && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                style={{ marginLeft: 8, padding: "2px 8px" }}
+                                disabled={isRunning}
+                                onClick={() =>
+                                  setParam(
+                                    "crawl_max_pages",
+                                    crawlPreview.discovered_total
+                                  )
+                                }
+                              >
+                                设为全部
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="field">
                     <label>学习目标</label>
@@ -341,6 +608,11 @@ export default function App() {
 
         {tab === "logs" && (
           <div className="logs-layout">
+            {!activeSummary && (
+              <div className="alert" style={{ marginBottom: 16 }}>
+                暂无选中任务。请从左侧「历史运行」选择记录，或启动新任务。
+              </div>
+            )}
             <TimingPanel
               runElapsedMs={timing.runElapsedMs}
               currentStep={timing.currentStep}
@@ -381,11 +653,21 @@ export default function App() {
             )}
 
             <LogViewer events={events} />
+            {activeSummary && events.length === 0 && (
+              <p className="field-hint" style={{ marginTop: 8 }}>
+                页面刷新后实时日志从当前进度继续；完整产物见 outputs/{activeSummary.task_id}/
+              </p>
+            )}
           </div>
         )}
 
         {tab === "curve" && (
           <div className="content-scroll">
+            {!activeSummary && (
+              <div className="alert" style={{ marginBottom: 16 }}>
+                暂无选中任务。请从左侧「历史运行」选择一条记录查看学习曲线。
+              </div>
+            )}
             {activeSummary && (
               <div className="metric-cards" style={{ marginBottom: 20 }}>
                 <MetricCard label="任务" value={activeSummary.task_id} compact />
@@ -405,14 +687,24 @@ export default function App() {
             <LearningCurve
               runs={activeSummary ? [activeSummary] : []}
               targetAccuracy={(params.target_accuracy as number) ?? 0.85}
+              chapterMasteryAccuracy={
+                (params.chapter_mastery_accuracy as number) ?? 0.98
+              }
               liveHistory={liveHistory}
               liveMacro={activeSummary?.macro_iter}
               roundRecords={activeSummary?.round_records}
+              chapterProgress={activeSummary?.chapter_progress}
+              learningMode={activeSummary?.learning_mode}
             />
           </div>
         )}
 
-        {tab === "compare" && <ComparePanel />}
+        {tab === "compare" && (
+          <ComparePanel
+            activeRunId={activeRunId}
+            onSelectRun={(run) => selectRun(run, { switchTab: "curve" })}
+          />
+        )}
       </main>
     </div>
   );
@@ -428,6 +720,7 @@ function phaseLabel(phase: string): string {
     student_answer_batch: "作答",
     exam_batch_router: "批次调度",
     judge_score: "评分",
+    consolidate_chapter_notes: "巩固记忆",
     observer_analyze: "观察",
     macro_router: "迭代判定",
     done: "完成",

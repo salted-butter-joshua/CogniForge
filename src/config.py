@@ -96,8 +96,27 @@ class Settings(BaseSettings):
     macro_iter_timeout: int = Field(default=3600, alias="MACRO_ITER_TIMEOUT")
 
     crawl_enabled: bool = Field(default=True, alias="CRAWL_ENABLED")
-    crawl_max_pages: int = Field(default=100, alias="CRAWL_MAX_PAGES")
+    crawl_max_pages: int = Field(default=0, alias="CRAWL_MAX_PAGES")
     crawl_include_images: bool = Field(default=True, alias="CRAWL_INCLUDE_IMAGES")
+
+    # Chapter mastery learning mode
+    learning_mode: str = Field(default="chapter_mastery", alias="LEARNING_MODE")
+    chapter_mastery_accuracy: float = Field(
+        default=0.98, alias="CHAPTER_MASTERY_ACCURACY"
+    )
+    chapter_max_chars: int = Field(default=8000, alias="CHAPTER_MAX_CHARS")
+    long_term_notes_max_chars: int = Field(
+        default=6000, alias="LONG_TERM_NOTES_MAX_CHARS"
+    )
+    short_term_notes_max_chars: int = Field(
+        default=4000, alias="SHORT_TERM_NOTES_MAX_CHARS"
+    )
+    chapter_review_ratio: float = Field(default=0.1, alias="CHAPTER_REVIEW_RATIO")
+    # Closed-book exam memory budget split (must sum <= 1.0)
+    exam_long_term_ratio: float = Field(default=0.65, alias="EXAM_LONG_TERM_RATIO")
+    exam_working_layer_ratio: float = Field(
+        default=0.30, alias="EXAM_WORKING_LAYER_RATIO"
+    )
 
 
 @lru_cache

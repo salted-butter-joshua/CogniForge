@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { RoundRecord, RunSummary } from "../types";
+import type { ChapterProgress, RoundRecord, RunSummary } from "../types";
 
 const COLORS = ["#818cf8", "#a855f7", "#22d3ee", "#34d399", "#fbbf24", "#ec4899"];
 const DIFF_LABELS = ["入门", "基础", "进阶", "挑战", "综合"];
@@ -22,17 +22,23 @@ function diffLabel(level: number): string {
 interface Props {
   runs: RunSummary[];
   targetAccuracy?: number;
+  chapterMasteryAccuracy?: number;
   liveHistory?: number[];
   liveMacro?: number;
   roundRecords?: RoundRecord[];
+  chapterProgress?: ChapterProgress[];
+  learningMode?: string;
 }
 
 export default function LearningCurve({
   runs,
   targetAccuracy = 0.95,
+  chapterMasteryAccuracy = 0.98,
   liveHistory,
   liveMacro,
   roundRecords,
+  chapterProgress,
+  learningMode,
 }: Props) {
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const chartData = buildChartData(runs, liveHistory, liveMacro);
@@ -60,8 +66,19 @@ export default function LearningCurve({
       ? roundRecords!.find((r) => r.macro_iter === selectedRound - 1) ?? null
       : null;
 
+  const progress =
+    chapterProgress && chapterProgress.length > 0
+      ? chapterProgress
+      : selectedRec?.chapter_progress;
+
   return (
     <div className="panel">
+      {learningMode === "chapter_mastery" && progress && progress.length > 0 && (
+        <ChapterMasteryPanel
+          chapters={progress}
+          threshold={chapterMasteryAccuracy}
+        />
+      )}
       <div className="panel-body" style={{ paddingBottom: 8 }}>
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height="100%">
@@ -164,7 +181,16 @@ function RoundTooltip({
             难度：<b style={{ color: "#c4b5fd" }}>{diffLabel(rec.difficulty_level)}</b>（L
             {rec.difficulty_level}） · 出题 {rec.question_count} · 答对 {rec.correct}
           </div>
-          <div style={{ color: "#aeb3dc" }}>课程窗口：L{rec.curriculum_level}</div>
+          {rec.chapter_title ? (
+            <div style={{ color: "#aeb3dc" }}>
+              章节：{rec.chapter_title}
+              {typeof rec.chapter_accuracy === "number"
+                ? ` · 章正确率 ${(rec.chapter_accuracy * 100).toFixed(1)}%`
+                : ""}
+            </div>
+          ) : (
+            <div style={{ color: "#aeb3dc" }}>课程窗口：L{rec.curriculum_level}</div>
+          )}
           {topics.length > 0 && (
             <div style={{ marginTop: 4, color: "#aeb3dc" }}>
               题型：{topics.map(([k, v]) => `${k}×${v}`).join("，")}
@@ -202,8 +228,15 @@ function RoundDetail({ record, picked }: { record: RoundRecord | null; picked: b
           {diffLabel(record.difficulty_level)}（L{record.difficulty_level}）
         </div>
         <div>
-          <span className="rd-label">课程窗口</span>L{record.curriculum_level}
+          <span className="rd-label">课程窗口</span>
+          {record.chapter_title || `L${record.curriculum_level}`}
         </div>
+        {typeof record.chapter_accuracy === "number" && (
+          <div>
+            <span className="rd-label">章节正确率</span>
+            {(record.chapter_accuracy * 100).toFixed(1)}%
+          </div>
+        )}
         <div>
           <span className="rd-label">出题数</span>
           {record.question_count}
@@ -266,4 +299,49 @@ function buildChartData(
     rows.push(row);
   }
   return rows;
+}
+
+function ChapterMasteryPanel({
+  chapters,
+  threshold,
+}: {
+  chapters: ChapterProgress[];
+  threshold: number;
+}) {
+  const mastered = chapters.filter((c) => c.mastered).length;
+  return (
+    <div className="chapter-mastery-panel">
+      <div className="chapter-mastery-head">
+        <strong>章节掌握进度</strong>
+        <span>
+          {mastered}/{chapters.length} 章已掌握 · 门槛 {(threshold * 100).toFixed(0)}%
+        </span>
+      </div>
+      <div className="chapter-mastery-list">
+        {chapters.map((ch) => {
+          const pct = Math.round(Math.max(ch.best_accuracy, ch.accuracy) * 100);
+          const barPct = Math.min(pct, 100);
+          const done = ch.mastered;
+          return (
+            <div key={ch.chapter_id} className={`chapter-row ${done ? "mastered" : ""}`}>
+              <div className="chapter-row-title" title={ch.chapter_title}>
+                <span className="chapter-idx">{ch.chapter_index + 1}</span>
+                {ch.chapter_title}
+              </div>
+              <div className="chapter-bar-wrap">
+                <div
+                  className={`chapter-bar ${done ? "done" : ""}`}
+                  style={{ width: `${barPct}%` }}
+                />
+              </div>
+              <div className="chapter-stats">
+                {done ? "✓" : `${pct}%`}
+                {ch.attempts > 0 && !done ? ` · ${ch.attempts}次` : ""}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }

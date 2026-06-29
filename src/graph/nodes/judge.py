@@ -27,11 +27,19 @@ from src.models.llm_factory import judge_llm, observer_llm
 from src.tools.json_utils import extract_json, llm_retry
 
 from src.tools.learning_policy import (
+    all_chapters_mastered,
     apply_evidence_cap,
     adjust_difficulty_level,
+    chapter_exam_accuracy,
+    chapter_label,
+    current_chapter,
     format_batch_evidence_context,
     format_evidence_context,
+    is_chapter_mastery_mode,
+    mastery_progress_summary,
     maybe_advance_curriculum_level,
+    update_chapter_mastery_record,
+    update_reinforce_pool,
     weighted_accuracy,
 )
 
@@ -284,17 +292,63 @@ def judge_score(state: LearnLoopState) -> dict:
             advance_threshold=settings.difficulty_advance_accuracy,
             retreat_threshold=settings.difficulty_retreat_accuracy,
         )
-        new_curr, curr_advanced = maybe_advance_curriculum_level(
-            old_curr,
-            accuracy,
-            chunks,
-            settings.curriculum_pages_per_round,
-            advance_threshold=settings.curriculum_advance_accuracy,
-        )
+
+        chapter_mastery = dict(state.get("chapter_mastery") or {})
+        registry = list(state.get("chapter_registry") or [])
+        ch_index = int(state.get("current_chapter_index", 0) or 0)
+        ch_acc = accuracy
+        should_consolidate = False
+        new_curr = old_curr
+        curr_advanced = False
+        chapter_mastered_now = False
+
+        if is_chapter_mastery_mode() and registry:
+            ch = current_chapter(registry, ch_index)
+            if ch:
+                cid = ch["chapter_id"]
+                ch_acc = chapter_exam_accuracy(scored, cid, chunks)
+                ch_weak = [
+                    t
+                    for t, _ in weak_counter.most_common(6)
+                    if t and t != "未知主题"
+                ]
+                macro_i = int(state.get("macro_iter", 0) or 0)
+                chapter_mastery = update_chapter_mastery_record(
+                    chapter_mastery,
+                    cid,
+                    accuracy=ch_acc,
+                    macro_iter=macro_i,
+                    weak_subtopics=ch_weak,
+                    threshold=settings.chapter_mastery_accuracy,
+                )
+                rec = chapter_mastery.get(cid) or {}
+                should_consolidate = (
+                    ch_acc >= settings.chapter_mastery_accuracy
+                    and rec.get("mastered_at_iter") == macro_i
+                )
+                chapter_mastered_now = bool(rec.get("mastered"))
+                if not chapter_mastered_now:
+                    new_diff = old_diff
+        else:
+            new_curr, curr_advanced = maybe_advance_curriculum_level(
+                old_curr,
+                accuracy,
+                chunks,
+                settings.curriculum_pages_per_round,
+                advance_threshold=settings.curriculum_advance_accuracy,
+            )
 
         history = list(state.get("accuracy_history") or [])
 
-        history.append(accuracy)
+        loop_accuracy = ch_acc if is_chapter_mastery_mode() and registry else accuracy
+        history.append(loop_accuracy)
+
+        reinforce_questions = update_reinforce_pool(
+            list(state.get("reinforce_questions") or []),
+            scored,
+        )
+        reinforce_wrong = sum(1 for q in scored if q.get("is_reinforce") and not q.get("is_correct"))
+        reinforce_ok = sum(1 for q in scored if q.get("is_reinforce") and q.get("is_correct"))
 
         # Per-round record for the curve tooltip / clickable detail panel.
         topic_counts = Counter(q.get("topic_tag") or "未分类" for q in scored)
@@ -303,15 +357,27 @@ def judge_score(state: LearnLoopState) -> dict:
         )
         round_record = {
             "macro_iter": int(state.get("macro_iter", 0) or 0),
-            "accuracy": accuracy,
+            "accuracy": loop_accuracy,
             "plain_accuracy": plain_accuracy,
+            "batch_accuracy": accuracy,
+            "chapter_accuracy": ch_acc,
             "difficulty_level": old_diff,
             "curriculum_level": old_curr,
+            "current_chapter_index": ch_index,
+            "chapter_title": (
+                (current_chapter(registry, ch_index) or {}).get("chapter_title", "")
+                if registry
+                else ""
+            ),
             "question_count": len(scored),
             "correct": correct,
             "weak_topics": weak_topics[:6],
             "topic_counts": dict(topic_counts.most_common(8)),
             "persona_counts": dict(persona_counts),
+            "chapter_progress": mastery_progress_summary(registry, chapter_mastery),
+            "reinforce_correct": reinforce_ok,
+            "reinforce_wrong": reinforce_wrong,
+            "reinforce_pool_size": len(reinforce_questions),
         }
 
         report_lines = [
@@ -320,14 +386,32 @@ def judge_score(state: LearnLoopState) -> dict:
             f"- Correct: {correct}",
             f"- Plain accuracy: {plain_accuracy:.2%}",
             f"- Weighted accuracy: {accuracy:.2%} (used for loop)",
-            f"- Threshold: {CORRECT_THRESHOLD:.0%}",
-            f"- Difficulty level: {old_diff} -> {new_diff}",
-            f"- Curriculum level: {old_curr} -> {new_curr}"
-            + (" (advanced)" if curr_advanced else " (held)"),
-            f"- Weak topics: {', '.join(weak_topics) or 'none'}",
-            "",
-            "### Per-question",
         ]
+        if is_chapter_mastery_mode() and registry:
+            report_lines.append(
+                f"- Chapter accuracy: {ch_acc:.2%} "
+                f"({chapter_label(registry, ch_index)}, "
+                f"threshold {settings.chapter_mastery_accuracy:.0%})"
+            )
+            report_lines.extend(
+                [
+                    f"- Should consolidate: {should_consolidate}",
+                    f"- Chapters mastered: "
+                    f"{sum(1 for m in chapter_mastery.values() if m.get('mastered'))}"
+                    f"/{len(registry)}",
+                ]
+            )
+        report_lines.extend(
+            [
+                f"- Threshold: {CORRECT_THRESHOLD:.0%}",
+                f"- Difficulty level: {old_diff} -> {new_diff}",
+                f"- Curriculum level: {old_curr} -> {new_curr}"
+                + (" (advanced)" if curr_advanced else " (held)"),
+                f"- Weak topics: {', '.join(weak_topics) or 'none'}",
+                "",
+                "### Per-question",
+            ]
+        )
 
         for q in scored:
 
@@ -363,15 +447,20 @@ def judge_score(state: LearnLoopState) -> dict:
         return {
             "current_batch_qa": Overwrite(scored),
             "all_qa_archive": scored,
-            "batch_accuracy": accuracy,
+            "batch_accuracy": loop_accuracy,
             "accuracy_history": history,
             "weak_topics": weak_topics,
             "difficulty_level": new_diff,
             "curriculum_level": new_curr,
             "curriculum_advanced": curr_advanced,
+            "chapter_mastery": chapter_mastery,
+            "chapter_advanced": should_consolidate,
+            "reinforce_questions": reinforce_questions,
             "judge_report": report,
             "round_records": [round_record],
-            "phase": "observer_analyze",
+            "phase": "consolidate_chapter_notes"
+            if should_consolidate
+            else "observer_analyze",
         }
 
     except Exception as exc:
