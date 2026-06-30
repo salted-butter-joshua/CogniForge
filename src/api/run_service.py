@@ -100,6 +100,9 @@ def _apply_env_overrides(params: RunParams) -> None:
         "CURRICULUM_PAGES_PER_ROUND": str(params.curriculum_pages_per_round),
         "JUDGE_EVIDENCE_ONLY": "1" if params.judge_evidence_only else "0",
         "EVIDENCE_CAP_SCORE": str(params.evidence_cap_score),
+        "JUDGE_SEMANTIC_LENIENT": "1" if params.judge_semantic_lenient else "0",
+        "JUDGE_TEMPERATURE": str(params.judge_temperature),
+        "STUDENT_EXAM_TEMPERATURE": str(params.student_exam_temperature),
         "LEARNING_MODE": (
             "chapter_mastery" if params.use_chapter_mastery else "page_curriculum"
         ),
@@ -109,6 +112,7 @@ def _apply_env_overrides(params: RunParams) -> None:
         "CHAPTER_REVIEW_RATIO": str(params.chapter_review_ratio),
         "EXAM_LONG_TERM_RATIO": str(params.exam_long_term_ratio),
         "EXAM_WORKING_LAYER_RATIO": str(params.exam_working_layer_ratio),
+        "REINFORCE_POOL_RATIO": str(params.reinforce_pool_ratio),
         "CRAWL_ENABLED": "1" if params.crawl_enabled else "0",
         "CRAWL_MAX_PAGES": str(params.crawl_max_pages),
         "CRAWL_INCLUDE_IMAGES": "1" if params.crawl_include_images else "0",

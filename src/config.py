@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     min_macro_iter: int = Field(default=3, alias="MIN_MACRO_ITER")
     consecutive_pass_rounds: int = Field(default=2, alias="CONSECUTIVE_PASS_ROUNDS")
     closed_book_exam: bool = Field(default=True, alias="CLOSED_BOOK_EXAM")
-    student_notes_max_chars: int = Field(default=2500, alias="STUDENT_NOTES_MAX_CHARS")
+    student_notes_max_chars: int = Field(default=6000, alias="STUDENT_NOTES_MAX_CHARS")
     student_notes_study_max_chars: int = Field(default=8000, alias="STUDENT_NOTES_STUDY_MAX_CHARS")
     student_material_study_max_chars: int = Field(
         default=6000, alias="STUDENT_MATERIAL_STUDY_MAX_CHARS"
@@ -86,7 +86,10 @@ class Settings(BaseSettings):
     )
     judge_evidence_only: bool = Field(default=True, alias="JUDGE_EVIDENCE_ONLY")
     judge_evidence_max_chars: int = Field(default=12000, alias="JUDGE_EVIDENCE_MAX_CHARS")
-    evidence_cap_score: float = Field(default=0.78, alias="EVIDENCE_CAP_SCORE")
+    evidence_cap_score: float = Field(default=0.88, alias="EVIDENCE_CAP_SCORE")
+    judge_semantic_lenient: bool = Field(default=True, alias="JUDGE_SEMANTIC_LENIENT")
+    judge_temperature: float = Field(default=0.2, alias="JUDGE_TEMPERATURE")
+    student_exam_temperature: float = Field(default=0.25, alias="STUDENT_EXAM_TEMPERATURE")
 
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     output_dir: str = Field(default="./outputs", alias="OUTPUT_DIR")
@@ -109,13 +112,14 @@ class Settings(BaseSettings):
         default=6000, alias="LONG_TERM_NOTES_MAX_CHARS"
     )
     short_term_notes_max_chars: int = Field(
-        default=4000, alias="SHORT_TERM_NOTES_MAX_CHARS"
+        default=6000, alias="SHORT_TERM_NOTES_MAX_CHARS"
     )
     chapter_review_ratio: float = Field(default=0.1, alias="CHAPTER_REVIEW_RATIO")
+    reinforce_pool_ratio: float = Field(default=0.5, alias="REINFORCE_POOL_RATIO")
     # Closed-book exam memory budget split (must sum <= 1.0)
-    exam_long_term_ratio: float = Field(default=0.65, alias="EXAM_LONG_TERM_RATIO")
+    exam_long_term_ratio: float = Field(default=0.50, alias="EXAM_LONG_TERM_RATIO")
     exam_working_layer_ratio: float = Field(
-        default=0.30, alias="EXAM_WORKING_LAYER_RATIO"
+        default=0.45, alias="EXAM_WORKING_LAYER_RATIO"
     )
 
 

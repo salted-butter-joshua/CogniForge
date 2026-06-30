@@ -40,6 +40,8 @@ from src.tools.learning_policy import (
     format_wrong_qa_feedback,
     init_chapter_mastery_dict,
     is_chapter_mastery_mode,
+    sync_chapter_long_term_notes,
+    upsert_chapter_long_term_block,
 )
 
 from src.tools.web_fetch import build_chapter_registry, fetch_and_chunk_urls, material_context
@@ -374,6 +376,18 @@ def student_study(state: LearnLoopState) -> dict:
             registry = state.get("chapter_registry") or []
             idx = int(state.get("current_chapter_index", 0) or 0)
             ch = current_chapter(registry, idx)
+            if ch:
+                per_ch = max(
+                    200,
+                    settings.long_term_notes_max_chars // max(len(registry), 1),
+                )
+                result["long_term_notes"] = sync_chapter_long_term_notes(
+                    state.get("long_term_notes") or "",
+                    notes,
+                    ch.get("chapter_title", ""),
+                    per_chapter_max_chars=per_ch,
+                    total_max_chars=settings.long_term_notes_max_chars,
+                )
             archive = list(state.get("chapter_notes_archive") or [])
             journal = build_learning_journal(
                 archive,
@@ -611,11 +625,12 @@ def consolidate_chapter_notes(state: LearnLoopState) -> dict:
                 short_notes,
                 per_chapter_budget,
             )
-            block = f"## {ch.get('chapter_title', '')}\n{summary}"
-            long_term = (long_term + "\n\n" + block).strip()
-            if len(long_term) > settings.long_term_notes_max_chars:
-                long_term = long_term[-settings.long_term_notes_max_chars :]
-                long_term = "…（早期摘要已截断）\n" + long_term
+            long_term = upsert_chapter_long_term_block(
+                long_term,
+                ch.get("chapter_title", ""),
+                summary,
+                total_max_chars=settings.long_term_notes_max_chars,
+            )
         else:
             summary = ""
 
@@ -650,6 +665,8 @@ def consolidate_chapter_notes(state: LearnLoopState) -> dict:
             "chapter_notes_archive": archive,
             "learning_journal": journal,
             "reinforce_questions": [],
+            "topic_reinforce_streaks": {},
+            "graduated_topic_tags": [],
             "current_chapter_index": new_index,
             "regenerate_material": regenerate,
             "chapter_advanced": False,

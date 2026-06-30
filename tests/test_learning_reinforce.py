@@ -4,9 +4,13 @@ from src.tools.learning_policy import (
     append_chapter_archive,
     build_learning_journal,
     exam_notes_char_budget,
+    extract_core_memory_layer,
     extract_working_exam_layer,
     format_wrong_qa_feedback,
+    normalize_topic_key,
+    question_content_fingerprint,
     select_exam_notes,
+    sync_chapter_long_term_notes,
     update_reinforce_pool,
 )
 
@@ -30,10 +34,51 @@ Pod 是一组容器的集合，共享网络与存储……（很长）
 """
 
 
-def test_extract_working_exam_layer_excludes_framework():
+def test_extract_working_exam_layer_picks_study_sections():
     layer = extract_working_exam_layer(SAMPLE_NOTES, max_chars=2000)
-    assert "自测" in layer or "薄弱" in layer or "待澄清" in layer
-    assert "Pod 是一组容器的集合" not in layer
+    assert "自测" in layer or "薄弱" in layer or "易混淆" in layer
+    assert len(layer) > 0
+
+
+def test_extract_core_memory_layer_for_exam_long_term():
+    core = extract_core_memory_layer(SAMPLE_NOTES, max_chars=2000)
+    assert "Pod" in core or "Service" in core or "知识框架" in core
+    assert "薄弱点" not in core
+
+
+def test_sync_chapter_long_term_after_study():
+    short = SAMPLE_NOTES
+    lt = sync_chapter_long_term_notes(
+        "",
+        short,
+        "概述",
+        per_chapter_max_chars=2000,
+        total_max_chars=6000,
+    )
+    assert "## 概述" in lt
+    assert "Pod" in lt
+    lt2 = sync_chapter_long_term_notes(
+        lt,
+        short + "\n\n## 核心概念与要点\n- 新增：Deployment 管理副本",
+        "概述",
+        per_chapter_max_chars=2000,
+        total_max_chars=6000,
+    )
+    assert lt2.count("## 概述") == 1
+    assert "Deployment" in lt2
+
+
+def test_apply_evidence_cap_skipped_when_semantic_lenient():
+    from src.tools.learning_policy import apply_evidence_cap
+
+    score, reason = apply_evidence_cap(
+        "这是完全换词但语义正确的长篇回答" * 5,
+        "evidence 只有很少术语",
+        0.95,
+        semantic_lenient=True,
+    )
+    assert score == 0.95
+    assert reason == ""
 
 
 def test_select_exam_notes_uses_layers_not_full_working_notes():
@@ -44,8 +89,8 @@ def test_select_exam_notes_uses_layers_not_full_working_notes():
         chapter_title="概述",
     )
     assert "长期记忆" in bundle
-    assert "参考层" in bundle
-    assert "Pod 是一组容器的集合" not in bundle
+    assert "参考层" in bundle or "核心概念" in bundle
+    assert "闭卷记忆规则" in bundle
 
 
 def test_format_wrong_qa_feedback():
@@ -60,6 +105,8 @@ def test_format_wrong_qa_feedback():
 
 def test_update_reinforce_pool_adds_wrong_and_drops_correct_retry():
     pool = []
+    streaks: dict[str, int] = {}
+    graduated: set[str] = set()
     scored_wrong = [
         {
             "question": "Etcd 的作用是什么？",
@@ -71,7 +118,7 @@ def test_update_reinforce_pool_adds_wrong_and_drops_correct_retry():
             "persona_name": "考官",
         }
     ]
-    pool = update_reinforce_pool(pool, scored_wrong)
+    pool, streaks, graduated = update_reinforce_pool(pool, scored_wrong, streaks, graduated)
     assert len(pool) == 1
 
     scored_retry_ok = [
@@ -82,8 +129,44 @@ def test_update_reinforce_pool_adds_wrong_and_drops_correct_retry():
             "is_reinforce": True,
         }
     ]
-    pool = update_reinforce_pool(pool, scored_retry_ok)
+    pool, streaks, graduated = update_reinforce_pool(
+        pool, scored_retry_ok, streaks, graduated
+    )
     assert len(pool) == 0
+    assert "etcd" in graduated
+
+
+def test_topic_graduation_same_tag_different_wording():
+    """Same topic_tag + correct reinforce should graduate the topic, not only exact fingerprint."""
+    pool = [
+        {
+            "question": "Etcd 的作用是什么？",
+            "topic_tag": "etcd",
+            "is_reinforce": True,
+            "evidence_refs": ["c1"],
+        }
+    ]
+    streaks: dict[str, int] = {}
+    graduated: set[str] = set()
+    scored = [
+        {
+            "question": "请说明 ETCD 在集群中的职责",  # different wording, same topic
+            "answer": "分布式键值存储，保存集群状态",
+            "is_correct": True,
+            "is_reinforce": True,
+            "topic_tag": "etcd",
+            "evidence_refs": ["c1"],
+        }
+    ]
+    pool, streaks, graduated = update_reinforce_pool(pool, scored, streaks, graduated)
+    assert len(pool) == 0
+    assert "etcd" in graduated
+
+
+def test_question_fingerprint_case_insensitive_ascii():
+    a = question_content_fingerprint("What is etcd?")
+    b = question_content_fingerprint("What is ETCD?")
+    assert a == b
 
 
 def test_exam_notes_char_budget_is_closed_book_total():
@@ -105,3 +188,47 @@ def test_chapter_archive_and_journal():
     assert "学习全过程笔记" in journal
     assert "知识框架" in journal
     assert "闭卷考试时仅使用" in journal
+
+
+def test_chunks_for_exam_chapter_mode_no_review():
+    from src.tools.learning_policy import chunks_for_chapter, chunks_for_exam, init_chapter_mastery_dict
+
+    chunks = [
+        {"id": "c1", "chapter_id": "ch1", "content": "a"},
+        {"id": "c2", "chapter_id": "ch2", "content": "b"},
+    ]
+    registry = [
+        {"chapter_id": "ch1", "chapter_title": "A"},
+        {"chapter_id": "ch2", "chapter_title": "B"},
+    ]
+    mastery = init_chapter_mastery_dict(registry)
+    mastery["ch2"]["mastered"] = True
+    exam_chunks = chunks_for_exam(
+        chunks, registry, 0, mastery, review_ratio=0.5, chapter_mastery_mode=True
+    )
+    assert {c["id"] for c in exam_chunks} == {c["id"] for c in chunks_for_chapter(chunks, "ch1")}
+
+
+def test_study_aligned_chunk_ids():
+    from src.tools.learning_policy import study_aligned_chunk_ids
+
+    chunks = [
+        {"id": "c1", "chapter_id": "ch1", "heading": "Etcd 解析", "content": "etcd 是分布式 kv"},
+        {"id": "c2", "chapter_id": "ch1", "heading": "其他", "content": "unrelated topic xyz"},
+    ]
+    ids = study_aligned_chunk_ids(
+        chunks,
+        "ch1",
+        study_material="",
+        short_term_notes="## Etcd 解析\netcd 存储集群状态",
+    )
+    assert "c1" in ids
+    assert "c2" not in ids
+
+
+def test_reinforce_pool_cap_early_rounds():
+    from src.tools.learning_policy import reinforce_pool_cap
+
+    early = reinforce_pool_cap(20, macro_iter=0, chapter_attempts=1, ratio=0.5)
+    late = reinforce_pool_cap(20, macro_iter=5, chapter_attempts=6, ratio=0.5)
+    assert early >= late

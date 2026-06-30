@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 from collections import Counter
 
 from langchain_core.messages import HumanMessage
@@ -15,7 +13,7 @@ from src.graph.state import ExamQA, LearnLoopState, QuestionItem
 from src.graph.subgraphs.persona_exam.build import get_compiled_persona_exam
 from src.graph.subgraphs.persona_exam.state import PersonaExamState
 from src.logging_config import get_loop_logger
-from src.models.llm_factory import student_llm
+from src.models.llm_factory import student_exam_llm
 from src.tools.json_utils import extract_json, llm_retry
 from src.tools.learning_policy import (
     chapter_label,
@@ -23,8 +21,14 @@ from src.tools.learning_policy import (
     current_chapter,
     curriculum_chunks,
     exam_notes_char_budget,
+    filter_chunks_by_ids,
     is_chapter_mastery_mode,
+    normalize_topic_key,
+    question_content_fingerprint,
+    reinforce_pool_cap,
     select_exam_notes,
+    study_aligned_chunk_ids,
+    _dup_tokens,
 )
 
 logger = get_loop_logger()
@@ -60,19 +64,36 @@ def build_persona_exam_input(
         registry = list(parent.get("chapter_registry") or [])
         ch_index = int(parent.get("current_chapter_index", 0) or 0)
         mastery = dict(parent.get("chapter_mastery") or {})
+        ch = current_chapter(registry, ch_index)
         unlocked = chunks_for_exam(
             all_chunks,
             registry,
             ch_index,
             mastery,
             review_ratio=settings.chapter_review_ratio,
+            chapter_mastery_mode=True,
         )
         range_hint = chapter_label(registry, ch_index)
+        chapter_scope_label = range_hint
+        allowed_ids: set[str] = set()
+        if ch:
+            allowed_ids = study_aligned_chunk_ids(
+                all_chunks,
+                ch["chapter_id"],
+                study_material=parent.get("study_material") or "",
+                short_term_notes=parent.get("short_term_notes")
+                or parent.get("study_notes")
+                or "",
+                knowledge_cards=list(parent.get("knowledge_cards") or []),
+            )
+            unlocked = filter_chunks_by_ids(unlocked, allowed_ids)
     else:
         unlocked = curriculum_chunks(
             all_chunks, curriculum_level, settings.curriculum_pages_per_round
         )
         range_hint = ""
+        chapter_scope_label = ""
+        allowed_ids = set()
 
     # (A) Give each persona a DIFFERENT focus so they don't all ask the same
     # thing. Weak topics are split round-robin; each persona also gets a distinct
@@ -100,6 +121,8 @@ def build_persona_exam_input(
         chunks_snapshot=unlocked,
         weak_topics_snapshot=persona_weak,
         focus_hint=focus_hint,
+        chapter_scope_label=chapter_scope_label,
+        allowed_evidence_ids=sorted(allowed_ids),
         macro_iter_snapshot=macro,
         difficulty_level_snapshot=difficulty_level,
         curriculum_level_snapshot=curriculum_level,
@@ -138,17 +161,6 @@ def _invoke_persona_exam(state: PersonaExamState) -> list[QuestionItem]:
         return []
 
 
-_DUP_STOP = set("的了是在与和及对请吗呢以可并把被为之而其所这那有就都也很还要会能给出")
-
-
-def _dup_tokens(text: str) -> set[str]:
-    """Content tokens for near-duplicate detection: CJK chars + ascii words."""
-    text = text or ""
-    cjk = {c for c in text if "一" <= c <= "鿿" and c not in _DUP_STOP}
-    words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", text) if len(w) > 1}
-    return cjk | words
-
-
 def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
@@ -156,9 +168,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 def _question_fingerprint(text: str) -> str:
-    toks = sorted(_dup_tokens(text or ""))
-    raw = " ".join(toks[:40]).encode()
-    return hashlib.md5(raw).hexdigest()[:10]
+    return question_content_fingerprint(text)
 
 
 def _qa_to_question_item(qa: ExamQA) -> QuestionItem:
@@ -178,13 +188,22 @@ def _merge_reinforce_questions(
     reinforce_pool: list[QuestionItem],
     *,
     max_reinforce: int,
+    graduated_topics: set[str] | None = None,
 ) -> list[QuestionItem]:
     """Prepend pending wrong questions so the student re-encounters them."""
     if not reinforce_pool or max_reinforce <= 0:
         return new_questions
+    graduated = graduated_topics or set()
     existing = {_question_fingerprint(q.get("question", "")) for q in new_questions}
     picked: list[QuestionItem] = []
     for item in reinforce_pool:
+        tag = normalize_topic_key(
+            item.get("topic_tag", ""),
+            item.get("question", ""),
+            item.get("weak_topic_focus", ""),
+        )
+        if tag in graduated:
+            continue
         fp = _question_fingerprint(item.get("question", ""))
         if fp in existing:
             continue
@@ -253,9 +272,24 @@ def fanout_persona_exams(state: LearnLoopState) -> dict:
     all_questions = deduped
 
     reinforce_pool = list(state.get("reinforce_questions") or [])
-    max_reinforce = max(1, len(all_questions) // 4)
+    ch_attempts = 0
+    if is_chapter_mastery_mode():
+        registry = state.get("chapter_registry") or []
+        ch_index = int(state.get("current_chapter_index", 0) or 0)
+        ch = current_chapter(registry, ch_index)
+        if ch:
+            rec = (state.get("chapter_mastery") or {}).get(ch.get("chapter_id", "")) or {}
+            ch_attempts = int(rec.get("attempts", 0) or 0)
+    max_reinforce = reinforce_pool_cap(
+        len(all_questions),
+        macro_iter=macro,
+        chapter_attempts=ch_attempts,
+    )
     all_questions = _merge_reinforce_questions(
-        all_questions, reinforce_pool, max_reinforce=max_reinforce
+        all_questions,
+        reinforce_pool,
+        max_reinforce=max_reinforce,
+        graduated_topics=set(state.get("graduated_topic_tags") or []),
     )
     reinforce_added = sum(1 for q in all_questions if q.get("is_reinforce"))
 
@@ -315,7 +349,7 @@ def _answer_questions_batch(
     short_term_notes: str = "",
     chapter_title: str = "",
 ) -> list[str]:
-    llm = student_llm()
+    llm = student_exam_llm()
     q_payload = json.dumps(questions, ensure_ascii=False, indent=2)
     notes_excerpt = select_exam_notes(
         notes=study_notes,
@@ -325,12 +359,25 @@ def _answer_questions_batch(
         chapter_title=chapter_title,
     )
 
+    reinforce_tags = [
+        normalize_topic_key(q.get("topic_tag", ""), q.get("question", ""))
+        for q in questions
+        if q.get("is_reinforce")
+    ]
+    reinforce_hint = ""
+    if reinforce_tags:
+        reinforce_hint = (
+            f"\n\n【巩固题提示】含上轮错题复测（考点：{', '.join(sorted(set(reinforce_tags))[:6])}）。"
+            "题目措辞可能与笔记不同，但考点相同；请依据长期记忆与参考层作答，语义正确即可。"
+        )
+
     if closed_book:
         prompt = f"""你是学生 A，正在进行闭卷考试。
 你只能依靠「长期记忆（内化知识）」与极少量「工作记忆参考层（术语/易错/自测摘录）」作答。
 完整手抄笔记、教材原文不在考场上可用；禁止编造未在记忆材料中出现的细节。
 记不清的内容请明确说「不确定」或「不知道」。
 回答用自然语言，不要贴完整 YAML/大段代码。
+英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
 
 你的可用记忆（已按人脑分层筛选，非完整笔记）：
 {notes_excerpt or "（尚无可用记忆）"}
@@ -342,6 +389,7 @@ def _answer_questions_batch(
 [{{"answer": "你的回答"}}]"""
     else:
         prompt = f"""你是学生 A。根据学习笔记作答。不知道请明确说「不知道」。
+英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
 
 学习笔记（节选）：
 {notes_excerpt}

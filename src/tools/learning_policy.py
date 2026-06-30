@@ -283,8 +283,12 @@ def apply_evidence_cap(
     score: float,
     *,
     cap: float = 0.78,
+    semantic_lenient: bool = False,
 ) -> tuple[float, str]:
     """Penalize answers that introduce many terms absent from evidence."""
+    # Lexical term overlap contradicts semantic judging — skip when lenient mode is on.
+    if semantic_lenient:
+        return score, ""
     if score < cap or not answer.strip():
         return score, ""
     if any(k in answer for k in ("不知道", "不确定", "记不清", "没学过")):
@@ -297,7 +301,9 @@ def apply_evidence_cap(
 
     novel = ans_terms - ev_terms
     ratio = len(novel) / max(len(ans_terms), 1)
-    if ratio > 0.45 and len(novel) >= 6:
+    novel_threshold = 0.58 if semantic_lenient else 0.45
+    min_novel = 10 if semantic_lenient else 6
+    if ratio > novel_threshold and len(novel) >= min_novel:
         return min(score, cap), f"evidence_cap: 答案含 {len(novel)} 个证据外术语"
     return score, ""
 
@@ -396,12 +402,20 @@ def chunks_for_exam(
     chapter_mastery: dict[str, dict],
     *,
     review_ratio: float = 0.1,
+    chapter_mastery_mode: bool = False,
 ) -> list[dict]:
-    """Current chapter chunks + optional review chunks from mastered chapters."""
+    """Exam chunk scope aligned with study scope.
+
+    In chapter mastery mode: only current-chapter primary chunks (no cross-chapter
+    review) until the design explicitly enables review after mastery.
+    """
     ch = current_chapter(registry, chapter_index)
     if not ch:
         return filter_content_chunks(chunks)
     primary = chunks_for_chapter(chunks, ch["chapter_id"])
+    if chapter_mastery_mode:
+        return primary or filter_content_chunks(chunks)
+
     if review_ratio <= 0:
         return primary or filter_content_chunks(chunks)
 
@@ -422,6 +436,80 @@ def chunks_for_exam(
     return primary + review
 
 
+def _terms_in_text(terms: set[str], text: str) -> int:
+    text_l = text.lower()
+    return sum(1 for t in terms if len(t) >= 2 and t.lower() in text_l)
+
+
+def study_aligned_chunk_ids(
+    chunks: list[dict],
+    chapter_id: str,
+    *,
+    study_material: str = "",
+    short_term_notes: str = "",
+    knowledge_cards: list[dict] | None = None,
+) -> set[str]:
+    """Chunk IDs plausibly covered in this round's study (P1 exam alignment)."""
+    chapter_chunks = chunks_for_chapter(chunks, chapter_id)
+    if not chapter_chunks:
+        return set()
+
+    material = (study_material or "").strip()
+    notes = (short_term_notes or "").strip()
+    combined = f"{material}\n{notes}"
+    allowed: set[str] = set()
+
+    for c in chapter_chunks:
+        cid = c.get("id", "")
+        if not cid:
+            continue
+        if cid in combined:
+            allowed.add(cid)
+            continue
+        heading = (c.get("heading") or c.get("title") or "").strip()
+        if len(heading) >= 2 and heading in combined:
+            allowed.add(cid)
+            continue
+        content_terms = _answer_terms((c.get("content") or "")[:400])
+        if notes and content_terms and _terms_in_text(content_terms, notes) >= 2:
+            allowed.add(cid)
+
+    for card in knowledge_cards or []:
+        ref = (card.get("source_ref") or "").strip()
+        if ref:
+            allowed.add(ref)
+
+    if not allowed:
+        return {c.get("id") for c in chapter_chunks if c.get("id")}
+    return allowed
+
+
+def filter_chunks_by_ids(chunks: list[dict], allowed_ids: set[str]) -> list[dict]:
+    if not allowed_ids:
+        return chunks
+    filtered = [c for c in chunks if c.get("id") in allowed_ids]
+    return filtered or chunks
+
+
+def reinforce_pool_cap(
+    new_question_count: int,
+    *,
+    macro_iter: int,
+    chapter_attempts: int,
+    ratio: float | None = None,
+) -> int:
+    """How many reinforce (wrong-question retry) items to inject this batch."""
+    settings = get_settings()
+    base = ratio if ratio is not None else settings.reinforce_pool_ratio
+    if chapter_attempts <= 2 or macro_iter <= 1:
+        effective = min(0.65, base + 0.15)
+    elif chapter_attempts <= 4:
+        effective = base
+    else:
+        effective = max(0.3, base - 0.05)
+    return max(1, int(new_question_count * effective))
+
+
 def chapter_label(registry: list[dict], index: int) -> str:
     ch = current_chapter(registry, index)
     if not ch:
@@ -435,18 +523,109 @@ def _split_markdown_sections(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-# Sections from working notes allowed at closed-book exam (shallow reference layer).
+# Shallow cues at closed-book exam (NOT full exposition — that lives in long-term).
 WORKING_EXAM_SECTION_HINTS: tuple[str, ...] = (
     "自测",
     "易错",
     "易混淆",
     "待澄清",
     "薄弱",
-    "术语",
     "口诀",
     "对比",
     "参考层",
 )
+
+# Internalized knowledge — synced into long_term_notes each study round.
+CORE_MEMORY_SECTION_HINTS: tuple[str, ...] = (
+    "知识框架",
+    "核心概念",
+    "关键术语",
+)
+
+
+def extract_core_memory_layer(notes: str, max_chars: int) -> str:
+    """Extract internalized core (framework + concepts) for closed-book long-term memory."""
+    notes = (notes or "").strip()
+    if not notes or max_chars <= 0:
+        return ""
+
+    sections = _split_markdown_sections(notes)
+    picked: list[str] = []
+    for sec in sections:
+        header = sec.split("\n", 1)[0].lower()
+        if any(hint in header for hint in CORE_MEMORY_SECTION_HINTS):
+            picked.append(sec)
+
+    if not picked:
+        return ""
+
+    return _truncate_sections("\n\n".join(picked), max_chars)
+
+
+def _replace_chapter_block(long_term: str, chapter_title: str, new_block: str) -> str:
+    """Replace or append a ## chapter_title section in long-term notes."""
+    title = (chapter_title or "").strip()
+    if not title:
+        return (long_term + "\n\n" + new_block).strip() if new_block.strip() else long_term
+
+    marker = f"## {title}"
+    text = (long_term or "").strip()
+    if not text:
+        return new_block.strip()
+
+    parts = re.split(r"(?=^##\s)", text, flags=re.MULTILINE)
+    kept: list[str] = []
+    replaced = False
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith(marker):
+            if not replaced:
+                kept.append(new_block.strip())
+                replaced = True
+            continue
+        kept.append(part)
+    if not replaced:
+        kept.append(new_block.strip())
+    return "\n\n".join(kept).strip()
+
+
+def sync_chapter_long_term_notes(
+    long_term_notes: str,
+    short_term_notes: str,
+    chapter_title: str,
+    *,
+    per_chapter_max_chars: int,
+    total_max_chars: int,
+) -> str:
+    """After each study round, mirror note core into exam long-term memory (same chapter)."""
+    core = extract_core_memory_layer(short_term_notes, per_chapter_max_chars)
+    if not core.strip():
+        return long_term_notes or ""
+    return upsert_chapter_long_term_block(
+        long_term_notes,
+        chapter_title,
+        core,
+        total_max_chars=total_max_chars,
+    )
+
+
+def upsert_chapter_long_term_block(
+    long_term_notes: str,
+    chapter_title: str,
+    body: str,
+    *,
+    total_max_chars: int,
+) -> str:
+    """Replace ## chapter section in long-term notes (study sync or mastery compress)."""
+    if not body.strip():
+        return long_term_notes or ""
+    block = f"## {chapter_title}\n{body.strip()}"
+    merged = _replace_chapter_block(long_term_notes or "", chapter_title, block)
+    if len(merged) > total_max_chars:
+        merged = _truncate_sections(merged, total_max_chars)
+    return merged
 
 
 def extract_working_exam_layer(notes: str, max_chars: int) -> str:
@@ -593,10 +772,12 @@ def select_exam_notes(
     study/archive only, matching human memory: internalized vs cheat-sheet cues.
     """
     settings = get_settings()
-    lt_ratio = min(max(settings.exam_long_term_ratio, 0.0), 0.9)
+    # Body budget split; leave headroom for closed-book preamble (trimmed to max_chars).
+    _sum_cap = 0.95
+    lt_ratio = min(max(settings.exam_long_term_ratio, 0.0), 0.95)
     wl_ratio = min(max(settings.exam_working_layer_ratio, 0.0), 0.5)
-    if lt_ratio + wl_ratio > 0.95:
-        wl_ratio = max(0.05, 0.95 - lt_ratio)
+    if lt_ratio + wl_ratio > _sum_cap:
+        wl_ratio = max(0.0, _sum_cap - lt_ratio)
 
     lt_budget = int(max_chars * lt_ratio)
     wl_budget = int(max_chars * wl_ratio)
@@ -667,29 +848,127 @@ def format_wrong_qa_feedback(qa_list: list[dict], *, max_items: int = 8) -> str:
     return "\n".join(lines)
 
 
-def _question_fingerprint(text: str) -> str:
+_DUP_STOP = frozenset(
+    "的了是在与和及对请吗呢以可并把被为之而其所这那有就都也很还要会能给出"
+)
+
+
+def _dup_tokens(text: str) -> set[str]:
+    """Content tokens for near-duplicate / topic clustering (ASCII case-insensitive)."""
+    text = text or ""
+    cjk = {c for c in text if "一" <= c <= "鿿" and c not in _DUP_STOP}
+    words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", text) if len(w) > 1}
+    return cjk | words
+
+
+def question_content_fingerprint(text: str) -> str:
+    """Stable fingerprint from question wording (case-insensitive for ASCII)."""
     import hashlib
 
-    toks = sorted(re.findall(r"[\w\u4e00-\u9fff]{2,}", (text or "").lower()))
+    toks = sorted(_dup_tokens(text))
     raw = " ".join(toks[:40]).encode()
     return hashlib.md5(raw).hexdigest()[:10]
+
+
+def normalize_topic_key(
+    topic_tag: str = "",
+    question: str = "",
+    weak_topic: str = "",
+) -> str:
+    """Canonical key for same-type / same-topic tracking."""
+    raw = (topic_tag or weak_topic or "").strip().lower()
+    if raw and raw not in ("未分类", "未知主题", "?", "unknown"):
+        return raw
+    return f"q:{question_content_fingerprint(question)}"
+
+
+def questions_overlap(
+    q1: str,
+    q2: str,
+    *,
+    tag1: str = "",
+    tag2: str = "",
+    threshold: float = 0.6,
+    same_tag_threshold: float = 0.35,
+) -> bool:
+    """Whether two questions target the same type (semantic / topic)."""
+    t1 = _dup_tokens(q1)
+    t2 = _dup_tokens(q2)
+    if not t1 or not t2:
+        return False
+    j = len(t1 & t2) / len(t1 | t2)
+    tg1 = (tag1 or "").strip().lower()
+    tg2 = (tag2 or "").strip().lower()
+    if tg1 and tg1 == tg2 and j >= same_tag_threshold:
+        return True
+    return j >= threshold
 
 
 def update_reinforce_pool(
     pool: list[dict],
     scored: list[dict],
+    topic_streaks: dict[str, int] | None = None,
+    graduated_topics: set[str] | None = None,
     *,
     max_size: int = 20,
-) -> list[dict]:
-    """Keep wrong questions for re-test; drop items answered correctly on retry."""
-    by_fp = {_question_fingerprint(item.get("question", "")): dict(item) for item in pool}
-    for qa in scored:
-        fp = _question_fingerprint(qa.get("question", ""))
-        if qa.get("is_reinforce") and qa.get("is_correct"):
+) -> tuple[list[dict], dict[str, int], set[str]]:
+    """Keep wrong questions for re-test; graduate topics when semantically mastered."""
+    streaks = dict(topic_streaks or {})
+    graduated = set(graduated_topics or [])
+    by_fp: dict[str, dict] = {
+        question_content_fingerprint(item.get("question", "")): dict(item) for item in pool
+    }
+
+    def _pool_has_topic(tag: str) -> bool:
+        return any(
+            normalize_topic_key(
+                p.get("topic_tag", ""),
+                p.get("question", ""),
+                p.get("weak_topic_focus", ""),
+            )
+            == tag
+            for p in by_fp.values()
+        )
+
+    def _drop_topic(tag: str) -> None:
+        drop_fps = [
+            fp
+            for fp, item in by_fp.items()
+            if normalize_topic_key(
+                item.get("topic_tag", ""),
+                item.get("question", ""),
+                item.get("weak_topic_focus", ""),
+            )
+            == tag
+        ]
+        for fp in drop_fps:
             by_fp.pop(fp, None)
-            continue
+
+    for qa in scored:
+        tag = normalize_topic_key(
+            qa.get("topic_tag", ""),
+            qa.get("question", ""),
+            qa.get("weak_topic_focus", ""),
+        )
+
         if qa.get("is_correct"):
+            streaks[tag] = streaks.get(tag, 0) + 1
+            in_pool = _pool_has_topic(tag)
+            should_graduate = (
+                qa.get("is_reinforce")
+                or in_pool
+                or streaks[tag] >= 2
+            )
+            if should_graduate:
+                graduated.add(tag)
+                _drop_topic(tag)
+                streaks[tag] = max(streaks[tag], 2)
             continue
+
+        streaks[tag] = 0
+        graduated.discard(tag)
+
+        fp = question_content_fingerprint(qa.get("question", ""))
         by_fp[fp] = {
             "question": qa.get("question", ""),
             "evidence_refs": list(qa.get("evidence_refs") or []),
@@ -699,8 +978,14 @@ def update_reinforce_pool(
             "persona_name": qa.get("persona_name", "巩固复测"),
             "is_reinforce": True,
         }
+
     ordered = list(by_fp.values())
-    return ordered[-max_size:]
+    return ordered[-max_size:], streaks, graduated
+
+
+def _question_fingerprint(text: str) -> str:
+    """Alias for backward compatibility."""
+    return question_content_fingerprint(text)
 
 
 def build_chapter_study_context(

@@ -25,20 +25,24 @@ class RunParams(BaseModel):
     questions_per_persona: int = Field(5, ge=1, le=30)
 
     closed_book_exam: bool = True
-    student_notes_max_chars: int = Field(4000, ge=500, le=20000)
+    student_notes_max_chars: int = Field(6000, ge=500, le=20000)
     student_notes_study_max_chars: int = Field(8000, ge=1000, le=50000)
     curriculum_pages_per_round: int = Field(12, ge=1, le=200)
     judge_evidence_only: bool = True
-    evidence_cap_score: float = Field(0.78, ge=0.5, le=1.0)
+    evidence_cap_score: float = Field(0.88, ge=0.5, le=1.0)
+    judge_semantic_lenient: bool = True
+    judge_temperature: float = Field(0.2, ge=0.0, le=1.5)
+    student_exam_temperature: float = Field(0.25, ge=0.0, le=1.5)
 
     # Chapter mastery mode (default on; set use_chapter_mastery=false for legacy page mode)
     use_chapter_mastery: bool = True
     chapter_mastery_accuracy: float = Field(0.98, ge=0.5, le=1.0)
-    short_term_notes_max_chars: int = Field(4000, ge=500, le=50000)
+    short_term_notes_max_chars: int = Field(6000, ge=500, le=50000)
     long_term_notes_max_chars: int = Field(6000, ge=1000, le=50000)
     chapter_review_ratio: float = Field(0.1, ge=0.0, le=0.5)
-    exam_long_term_ratio: float = Field(0.65, ge=0.2, le=0.9)
-    exam_working_layer_ratio: float = Field(0.30, ge=0.05, le=0.5)
+    exam_long_term_ratio: float = Field(0.50, ge=0.2, le=0.95)
+    exam_working_layer_ratio: float = Field(0.45, ge=0.0, le=0.5)
+    reinforce_pool_ratio: float = Field(0.5, ge=0.1, le=0.8)
 
     crawl_max_pages: int = Field(0, ge=0, le=500)
     crawl_include_images: bool = False
@@ -111,6 +115,7 @@ class ParamFieldSchema(BaseModel):
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
+    step: Optional[float] = None
     group: str
     visible_when_key: Optional[str] = None
     visible_when_equals: Any = None

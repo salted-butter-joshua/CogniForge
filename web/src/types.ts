@@ -25,6 +25,7 @@ export interface ParamField {
   default: unknown;
   min?: number;
   max?: number;
+  step?: number;
   group: string;
   visible_when_key?: string;
   visible_when_equals?: unknown;

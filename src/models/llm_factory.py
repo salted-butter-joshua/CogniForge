@@ -139,8 +139,17 @@ def persona_llm() -> BaseChatModel:
 
 
 def judge_llm() -> BaseChatModel:
-    # Slight freedom so scoring weighs both fit-to-evidence and answer flexibility.
-    return _base_llm("judge", temperature=0.2)
+    """Semantic judging needs moderate temperature — 0.0 over-penalizes paraphrase."""
+    from src.config import get_settings
+
+    return _base_llm("judge", temperature=get_settings().judge_temperature)
+
+
+def student_exam_llm() -> BaseChatModel:
+    """Exam answering — configurable temperature (default slightly below study)."""
+    from src.config import get_settings
+
+    return _base_llm("student", temperature=get_settings().student_exam_temperature)
 
 
 def observer_llm() -> BaseChatModel:

@@ -1,4 +1,5 @@
 import type { CrawlPreview, ParamSchema, RunSummary } from "./types";
+import { formatApiError } from "./utils/apiError";
 
 const API = "/api";
 
@@ -30,7 +31,7 @@ export async function previewCrawl(
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || "链接探测失败");
+    throw new Error(formatApiError(err.detail, "链接探测失败"));
   }
   return r.json();
 }
@@ -59,7 +60,7 @@ export async function startRun(body: Record<string, unknown>): Promise<{
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || "Failed to start run");
+    throw new Error(formatApiError(err.detail, "启动任务失败"));
   }
   return r.json();
 }

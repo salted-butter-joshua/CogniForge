@@ -73,23 +73,32 @@ function Field({
   }
 
   if (field.type === "float" || field.type === "int") {
+    const numValue =
+      typeof value === "number" && Number.isFinite(value)
+        ? value
+        : (field.default as number);
+    const step =
+      field.step ?? (field.type === "float" ? 0.01 : 1);
     return (
       <div className="field">
         <label>{field.label}</label>
         <input
           type="number"
-          step={field.type === "float" ? 0.01 : 1}
+          step={step}
           min={field.min}
           max={field.max}
-          value={value as number}
+          value={numValue}
           disabled={disabled}
-          onChange={(e) =>
-            onChange(
-              field.type === "float"
-                ? parseFloat(e.target.value)
-                : parseInt(e.target.value, 10)
-            )
-          }
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            if (raw === "") return;
+            const parsed =
+              field.type === "float" ? parseFloat(raw) : parseInt(raw, 10);
+            if (!Number.isFinite(parsed)) return;
+            if (field.min != null && parsed < field.min) return;
+            if (field.max != null && parsed > field.max) return;
+            onChange(parsed);
+          }}
         />
         <div className="field-hint">{field.description}</div>
       </div>

@@ -146,12 +146,26 @@ def _judge_batch(
 
 score >= {CORRECT_THRESHOLD} 则 is_correct=true。
 
-证据未覆盖的细节不得因「合理推断」给高分。"""
+评分原则（语义导向）：
+- 答案与 evidence 的**中心意思一致**即可判对，不要求用词与原文一致
+- 同义改写、合理概括、正确举例应给高分
+- 仅当核心概念错误、明显矛盾、或编造与 evidence 冲突的细节时才判错
+- 同一考点（topic）只要中心意思正确，不因表述方式与 evidence 字面不同而判错
+
+评分格式与等价规则：
+- 英文大小写不敏感（如 etcd、Etcd、ETCD 视为相同术语，除非 evidence 明确区分）
+- 允许同义词、缩写与 evidence 全称等价（如 K8s / Kubernetes），前提是 evidence 支持该等价
+- 比较的是语义中心，不是字符串完全匹配"""
 
     resp = llm.invoke(
         [
             SystemMessage(
-                content="严格客观评分，禁止放水，禁止接受 evidence 外的细节。"
+                content=(
+                    "语义导向评分：比较答案与 evidence 的中心意思是否一致。"
+                    "同义改写、合理概括、换问法后的等价回答应判对；"
+                    "禁止仅因字面不同、英文大小写不同、或措辞与 evidence 不完全一致就判错。"
+                    "temperature 用于稳定评分标准，而非要求字面匹配。"
+                )
             ),
             HumanMessage(content=prompt),
         ]
@@ -236,6 +250,7 @@ def judge_score(state: LearnLoopState) -> dict:
                     evidence_text,
                     score,
                     cap=settings.evidence_cap_score,
+                    semantic_lenient=settings.judge_semantic_lenient,
                 )
 
                 if cap_reason:
@@ -343,9 +358,11 @@ def judge_score(state: LearnLoopState) -> dict:
         loop_accuracy = ch_acc if is_chapter_mastery_mode() and registry else accuracy
         history.append(loop_accuracy)
 
-        reinforce_questions = update_reinforce_pool(
+        reinforce_questions, topic_streaks, graduated = update_reinforce_pool(
             list(state.get("reinforce_questions") or []),
             scored,
+            dict(state.get("topic_reinforce_streaks") or {}),
+            set(state.get("graduated_topic_tags") or []),
         )
         reinforce_wrong = sum(1 for q in scored if q.get("is_reinforce") and not q.get("is_correct"))
         reinforce_ok = sum(1 for q in scored if q.get("is_reinforce") and q.get("is_correct"))
@@ -378,6 +395,7 @@ def judge_score(state: LearnLoopState) -> dict:
             "reinforce_correct": reinforce_ok,
             "reinforce_wrong": reinforce_wrong,
             "reinforce_pool_size": len(reinforce_questions),
+            "graduated_topic_count": len(graduated),
         }
 
         report_lines = [
@@ -456,6 +474,8 @@ def judge_score(state: LearnLoopState) -> dict:
             "chapter_mastery": chapter_mastery,
             "chapter_advanced": should_consolidate,
             "reinforce_questions": reinforce_questions,
+            "topic_reinforce_streaks": topic_streaks,
+            "graduated_topic_tags": sorted(graduated),
             "judge_report": report,
             "round_records": [round_record],
             "phase": "consolidate_chapter_notes"

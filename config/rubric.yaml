@@ -2,19 +2,24 @@ rubric:
   dimensions:
     - name: factual_correctness
       weight: 0.55
-      description: 答案事实必须能在 evidence_refs 对应原文中找到，禁止合理外推
+      description: 答案核心含义与 evidence 一致即可；允许换词、概括，不要求逐字匹配原文
     - name: completeness
       weight: 0.20
-      description: 覆盖问题关键点（仅限 evidence 范围内）
+      description: 覆盖问题关键点（语义层面，非字面罗列）
     - name: clarity
       weight: 0.10
       description: 表达清楚、结构合理
     - name: boundary_awareness
       weight: 0.15
-      description: 证据不足时必须承认不知道，编造细节从严扣分
-  correct_threshold: 0.85
+      description: 证据不足时必须承认不知道；与 evidence 中心意思明显矛盾才从严扣分
+  correct_threshold: 0.80
   target_accuracy: 0.95
   scoring_rules:
     - 你只能看到每道题的 evidence_refs 原文，看不到学生笔记和完整教材
-    - evidence 未提及的细节一律视为错误或过拟合，不得因「合理推断」给高分
-    - P4/P5 综合题与排错题权重更高，需严格核对多段 evidence
+    - 以「中心意思是否一致」为主：同义表述、合理概括、正确换词应给高分
+    - 不要求与 evidence 用词完全一致；仅当核心概念错误或明显矛盾时才判错
+    - 证据未覆盖的细节：若属于合理概括且未改变核心含义，不应因此单独扣分
+    - 学生明确说「不知道/不确定」且 evidence 确实不足以回答，应给 partial 分而非 0 分
+    - 编造与 evidence 中心意思明显矛盾的细节才从严扣分
+    - 英文术语大小写不敏感（etcd/Etcd/ETCD 等价）；中英同义表述与 evidence 中心一致即算对
+    - 同一考点（topic）只要中心意思正确，不因表述方式与 evidence 字面不同而判错

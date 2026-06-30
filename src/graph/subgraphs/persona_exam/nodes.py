@@ -98,16 +98,29 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
     curriculum_level = state.get("curriculum_level_snapshot") or 0
     diff_hint = exam_difficulty_hint(difficulty)
     weak_hint = ""
-    if weak and difficulty >= 1:
+    if weak:
+        weak_ratio = "约六成" if difficulty <= 1 else "约一半"
         weak_hint = (
             f"本轮聚焦薄弱点：{', '.join(weak)}。"
-            f"约一半题目围绕这些主题，难度等级 {difficulty}。"
+            f"{weak_ratio}题目应围绕这些主题（含变式问法），难度等级 {difficulty}。"
         )
     range_hint = ""
-    if curriculum_level >= 0:
+    chapter_scope = (state.get("chapter_scope_label") or "").strip()
+    if chapter_scope:
+        range_hint = f"出题范围仅限：{chapter_scope}。禁止引用该章以外的 evidence。"
+    elif curriculum_level >= 0:
         ppr = get_settings().curriculum_pages_per_round
-        range_hint = f"出题范围仅限：{curriculum_page_range_label(curriculum_level, ppr)}。"
+        range_hint = (
+            f"出题范围仅限：{curriculum_page_range_label(curriculum_level, ppr)}。"
+        )
 
+    allowed = set(state.get("allowed_evidence_ids") or [])
+    evidence_scope = ""
+    if allowed:
+        evidence_scope = (
+            f"evidence_refs 只能使用以下 chunk id：{', '.join(sorted(allowed)[:24])}"
+            f"{'…' if len(allowed) > 24 else ''}。"
+        )
     focus = state.get("focus_hint") or ""
     focus_hint_text = (
         f"本角色的出题重点章节：{focus}。请优先围绕这些章节命题，"
@@ -126,6 +139,7 @@ def _fuse_questions_llm(state: PersonaExamState) -> list[dict]:
     prompt = f"""你扮演「{state.get('persona_name')}」（{state.get('persona_style')}）。
 {state.get('persona_prompt_hint')}
 {range_hint}
+{evidence_scope}
 {focus_hint_text}
 {diff_hint}
 {weak_hint}
@@ -188,6 +202,9 @@ def fuse_questions(state: PersonaExamState) -> dict:
 
 def validate_questions(state: PersonaExamState) -> dict:
     chunks = state.get("chunks_snapshot") or []
+    allowed = set(state.get("allowed_evidence_ids") or [])
+    if allowed:
+        chunks = [c for c in chunks if c.get("id") in allowed] or chunks
     drafts = state.get("draft_questions") or []
     target = state.get("questions_target", 10)
     difficulty = state.get("difficulty_level_snapshot") or 0
@@ -209,6 +226,9 @@ def validate_questions(state: PersonaExamState) -> dict:
             errors.append(f"第 {i + 1} 题与前面重复")
         seen_questions.add(text)
         refs = q.get("evidence_refs") or []
+        if allowed and refs and not all(r in allowed for r in refs):
+            errors.append(f"第 {i + 1} 题 evidence 超出本轮学习范围")
+            continue
         if not valid_evidence_refs(refs, chunks):
             if chunks:
                 q["evidence_refs"] = [chunks[0].get("id", "")]

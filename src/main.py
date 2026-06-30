@@ -62,6 +62,8 @@ def build_initial_state(
         "current_batch_qa": [],
         "all_qa_archive": [],
         "reinforce_questions": [],
+        "topic_reinforce_streaks": {},
+        "graduated_topic_tags": [],
         "chapter_notes_archive": [],
         "learning_journal": "",
         "batch_accuracy": 0.0,

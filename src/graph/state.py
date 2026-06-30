@@ -99,6 +99,8 @@ class LearnLoopState(TypedDict, total=False):
     current_batch_qa: Annotated[list[ExamQA], merge_qa_lists]
     all_qa_archive: Annotated[list[ExamQA], merge_qa_lists]
     reinforce_questions: list[QuestionItem]
+    topic_reinforce_streaks: dict[str, int]
+    graduated_topic_tags: list[str]
     chapter_notes_archive: list[dict]
     learning_journal: str
 
