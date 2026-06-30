@@ -3,6 +3,7 @@
 outputs/
 web/node_modules/
 web/dist/
+*.tsbuildinfo
 __pycache__/
 *.pyc
 .pytest_cache/
