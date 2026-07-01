@@ -26,6 +26,7 @@ class PersonaExamState(TypedDict, total=False):
     persona_prompt_hint: str
     material_snapshot: str
     chunks_snapshot: list[dict]
+    evidence_pool_snapshot: list[dict]
     weak_topics_snapshot: list[str]
     focus_hint: str
     chapter_scope_label: str

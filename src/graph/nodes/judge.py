@@ -25,7 +25,6 @@ from src.logging_config import log_student_progress
 from src.models.llm_factory import judge_llm, observer_llm
 
 from src.tools.json_utils import extract_json, llm_retry
-
 from src.tools.learning_policy import (
     all_chapters_mastered,
     apply_evidence_cap,
@@ -42,6 +41,13 @@ from src.tools.learning_policy import (
     update_reinforce_pool,
     weighted_accuracy,
 )
+from src.tools.run_trace import (
+    append_round_trace,
+    chapter_question_counts,
+    judge_batch_diagnostics,
+    memory_snapshot,
+)
+from src.tools.token_tracker import tracker as token_tracker
 
 
 logger = logging.getLogger(__name__)
@@ -146,11 +152,12 @@ def _judge_batch(
 
 score >= {CORRECT_THRESHOLD} 则 is_correct=true。
 
-评分原则（语义导向）：
+评分原则（语义导向 + 机制精度）：
 - 答案与 evidence 的**中心意思一致**即可判对，不要求用词与原文一致
-- 同义改写、合理概括、正确举例应给高分
-- 仅当核心概念错误、明显矛盾、或编造与 evidence 冲突的细节时才判错
-- 同一考点（topic）只要中心意思正确，不因表述方式与 evidence 字面不同而判错
+- 同义改写、合理概括应给高分，但**不能把机制条件写反**（如 SSA 冲突是「同一字段」非「不同字段」）
+- 「会自动提示/检测」类表述须核对 evidence：默认是否为拒绝 apply、返回 Conflict、需 --force-conflicts 等
+- 仅当核心概念错误、机制条件错误、或与 evidence 明显矛盾时才判错
+- reason 必须写完整：指出答案中哪一句不严谨、evidence 中对应正确表述是什么
 
 评分格式与等价规则：
 - 英文大小写不敏感（如 etcd、Etcd、ETCD 视为相同术语，除非 evidence 明确区分）
@@ -161,10 +168,10 @@ score >= {CORRECT_THRESHOLD} 则 is_correct=true。
         [
             SystemMessage(
                 content=(
-                    "语义导向评分：比较答案与 evidence 的中心意思是否一致。"
-                    "同义改写、合理概括、换问法后的等价回答应判对；"
-                    "禁止仅因字面不同、英文大小写不同、或措辞与 evidence 不完全一致就判错。"
-                    "temperature 用于稳定评分标准，而非要求字面匹配。"
+                    "语义导向评分：中心意思一致即可判对，允许换词与概括。"
+                    "但对机制/因果/边界题：触发条件、作用对象、默认后果必须与 evidence 一致；"
+                    "「看似合理」的机制误述（如混淆同一字段与不同字段、把拒绝 apply 说成仅提示）应判错。"
+                    "reason 须完整写出扣分依据，便于追溯，勿截断或只写笼统评语。"
                 )
             ),
             HumanMessage(content=prompt),
@@ -312,6 +319,10 @@ def judge_score(state: LearnLoopState) -> dict:
         registry = list(state.get("chapter_registry") or [])
         ch_index = int(state.get("current_chapter_index", 0) or 0)
         ch_acc = accuracy
+        ch_rel = len(scored)
+        ch_total = len(scored)
+        chapter_evidence_fallback = False
+        cid = ""
         should_consolidate = False
         new_curr = old_curr
         curr_advanced = False
@@ -321,7 +332,8 @@ def judge_score(state: LearnLoopState) -> dict:
             ch = current_chapter(registry, ch_index)
             if ch:
                 cid = ch["chapter_id"]
-                ch_acc = chapter_exam_accuracy(scored, cid, chunks)
+                ch_acc, ch_rel, ch_total = chapter_exam_accuracy(scored, cid, chunks)
+                chapter_evidence_fallback = ch_rel == 0 and ch_total > 0
                 ch_weak = [
                     t
                     for t, _ in weak_counter.most_common(6)
@@ -367,11 +379,32 @@ def judge_score(state: LearnLoopState) -> dict:
         reinforce_wrong = sum(1 for q in scored if q.get("is_reinforce") and not q.get("is_correct"))
         reinforce_ok = sum(1 for q in scored if q.get("is_reinforce") and q.get("is_correct"))
 
+        judge_diag = judge_batch_diagnostics(scored)
+        mem = memory_snapshot(state)
+        token_round = token_tracker.snapshot_round(int(state.get("macro_iter", 0) or 0))
+        task_id = state.get("task_id", "default")
+        ch_counts = (
+            chapter_question_counts(scored, cid, chunks)
+            if cid
+            else {"chapter_relevant_count": ch_rel, "chapter_total_scored": ch_total}
+        )
+
         # Per-round record for the curve tooltip / clickable detail panel.
         topic_counts = Counter(q.get("topic_tag") or "未分类" for q in scored)
         persona_counts = Counter(
             q.get("persona_name") or q.get("persona_id") or "?" for q in scored
         )
+        wrong_samples = [
+            {
+                "question": q.get("question", ""),
+                "answer": q.get("answer", ""),
+                "judge_reason": q.get("judge_reason", ""),
+                "judge_score": q.get("judge_score", 0.0),
+                "topic_tag": q.get("topic_tag", ""),
+            }
+            for q in scored
+            if not q.get("is_correct")
+        ][:6]
         round_record = {
             "macro_iter": int(state.get("macro_iter", 0) or 0),
             "accuracy": loop_accuracy,
@@ -396,7 +429,40 @@ def judge_score(state: LearnLoopState) -> dict:
             "reinforce_wrong": reinforce_wrong,
             "reinforce_pool_size": len(reinforce_questions),
             "graduated_topic_count": len(graduated),
+            "chapter_relevant_count": ch_counts.get("chapter_relevant_count", ch_rel),
+            "chapter_total_scored": ch_counts.get("chapter_total_scored", ch_total),
+            "chapter_evidence_fallback": chapter_evidence_fallback,
+            "judge_anomaly": judge_diag.get("judge_anomaly", False),
+            "judge_anomaly_reason": judge_diag.get("judge_anomaly_reason", ""),
+            "empty_judge_reason_count": judge_diag.get("empty_judge_reason_count", 0),
+            "avg_judge_score": judge_diag.get("avg_judge_score", 0.0),
+            "long_term_notes_chars": mem.get("long_term_notes_chars", 0),
+            "short_term_notes_chars": mem.get("short_term_notes_chars", 0),
+            "token_round_total": token_round.get("token_round_total", 0),
+            "token_round_input": token_round.get("token_round_input", 0),
+            "token_round_output": token_round.get("token_round_output", 0),
+            "token_cumulative_total": token_round.get("token_cumulative_total", 0),
+            "token_cumulative_input": token_round.get("token_cumulative_input", 0),
+            "token_cumulative_output": token_round.get("token_cumulative_output", 0),
+            "token_calls_round": token_round.get("token_calls_round", 0),
+            "tokens_by_step_round": token_round.get("tokens_by_step_round", {}),
+            "settings_snapshot": {
+                "target_accuracy": settings.target_accuracy,
+                "chapter_mastery_accuracy": settings.chapter_mastery_accuracy,
+                "judge_semantic_lenient": settings.judge_semantic_lenient,
+                "judge_temperature": settings.judge_temperature,
+                "student_exam_temperature": settings.student_exam_temperature,
+                "exam_long_term_ratio": settings.exam_long_term_ratio,
+                "exam_working_layer_ratio": settings.exam_working_layer_ratio,
+                "reinforce_pool_ratio": settings.reinforce_pool_ratio,
+                "closed_book_exam": settings.closed_book_exam,
+                "study_notes_target_ratio": settings.study_notes_target_ratio,
+            },
+            "wrong_samples": wrong_samples,
         }
+
+        out = ensure_output_dir(task_id)
+        append_round_trace(out, round_record)
 
         report_lines = [
             f"## Judge Report — Macro Iter {state.get('macro_iter', 0)}",
@@ -437,16 +503,12 @@ def judge_score(state: LearnLoopState) -> dict:
 
             report_lines.append(
                 f"- [{mark}] {q.get('qa_id')} ({q.get('persona_name')}): "
-                f"score={q.get('judge_score', 0):.2f} — {q.get('judge_reason', '')[:80]}"
+                f"score={q.get('judge_score', 0):.2f} — {q.get('judge_reason', '')}"
             )
 
         report = "\n".join(report_lines)
 
-        task_id = state.get("task_id", "default")
-
         macro = state.get("macro_iter", 0)
-
-        out = ensure_output_dir(task_id)
 
         (out / f"judge_report_iter_{macro}.md").write_text(report, encoding="utf-8")
 

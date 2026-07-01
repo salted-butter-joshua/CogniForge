@@ -277,6 +277,149 @@ def _answer_terms(text: str) -> set[str]:
     return {t for t in re.findall(r"[\w\u4e00-\u9fff]{3,}", text.lower()) if len(t) > 2}
 
 
+def _question_terms(text: str) -> set[str]:
+    return _answer_terms(text)
+
+
+def question_chunk_overlap(question: str, chunk: dict) -> float:
+    """Lexical overlap between question stem and chunk text (0–1)."""
+    q_terms = _question_terms(question)
+    if not q_terms:
+        return 0.0
+    text = " ".join(
+        str(chunk.get(k) or "")
+        for k in ("title", "heading", "content")
+    )
+    c_terms = _answer_terms(text)
+    if not c_terms:
+        return 0.0
+    return len(q_terms & c_terms) / len(q_terms)
+
+
+def pick_evidence_refs_for_question(
+    question: str,
+    chunks: list[dict],
+    *,
+    allowed_ids: set[str] | None = None,
+    max_refs: int = 2,
+) -> list[str]:
+    """Pick chunk IDs whose text best matches the question stem."""
+    pool = [
+        c
+        for c in chunks
+        if c.get("id") and (not allowed_ids or c.get("id") in allowed_ids)
+    ]
+    if not pool:
+        pool = [c for c in chunks if c.get("id")]
+    if not pool:
+        return []
+    scored = sorted(
+        ((question_chunk_overlap(question, c), c) for c in pool),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    refs: list[str] = []
+    for score, chunk in scored:
+        cid = str(chunk.get("id", ""))
+        if not cid:
+            continue
+        if score <= 0 and refs:
+            break
+        if score <= 0 and not refs:
+            continue
+        refs.append(cid)
+        if len(refs) >= max_refs:
+            break
+    if not refs and pool:
+        refs = [str(pool[0].get("id", ""))]
+    return refs
+
+
+def ensure_question_evidence(
+    question: str,
+    refs: list[str],
+    chunks: list[dict],
+    *,
+    allowed_ids: set[str] | None = None,
+    min_overlap: float = 0.05,
+    max_refs: int = 2,
+) -> tuple[list[str], float]:
+    """Validate or rebind evidence_refs so they semantically match the question."""
+    pool = {str(c.get("id", "")): c for c in chunks if c.get("id")}
+    if not pool:
+        return refs, 0.0
+
+    search_pool = chunks
+    if allowed_ids:
+        narrowed = [c for c in chunks if c.get("id") in allowed_ids]
+        if narrowed:
+            search_pool = narrowed
+
+    def _best_in(pool_chunks: list[dict]) -> tuple[list[str], float]:
+        picked = pick_evidence_refs_for_question(
+            question,
+            pool_chunks,
+            allowed_ids=allowed_ids,
+            max_refs=max_refs,
+        )
+        score = max(
+            (question_chunk_overlap(question, pool[r]) for r in picked if r in pool),
+            default=0.0,
+        )
+        return picked, score
+
+    valid_refs = [r for r in refs if r in pool]
+    if valid_refs:
+        cited_best = max(
+            question_chunk_overlap(question, pool[r]) for r in valid_refs
+        )
+        best_refs, best_score = _best_in(search_pool)
+        if cited_best >= min_overlap and best_score <= cited_best * 1.15:
+            return valid_refs[:max_refs], cited_best
+
+    new_refs, best = _best_in(search_pool)
+    if best < min_overlap:
+        new_refs, best = _best_in(chunks)
+    return new_refs, best
+
+
+def sanitize_prior_study_notes(text: str) -> str:
+    """Strip accidental context/truncation markers copied into notes."""
+    if not (text or "").strip():
+        return ""
+    drop_prefixes = (
+        "【当前章节】",
+        "…（笔记已达长度上限",
+        "…（中间省略）",
+    )
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(p) for p in drop_prefixes):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def study_notes_output_paths(
+    out_dir,
+    *,
+    chapter_id: str | None = None,
+) -> tuple:
+    """Stable artifact paths: one notes MD per chapter (or single study_notes.md)."""
+    from pathlib import Path
+
+    base = Path(out_dir)
+    if chapter_id:
+        safe = re.sub(r"[^\w\-]", "_", chapter_id)[:80]
+        notes_path = base / f"study_notes_{safe}.md"
+        meta_path = base / f"study_notes_{safe}_meta.json"
+    else:
+        notes_path = base / "study_notes.md"
+        meta_path = base / "study_notes_meta.json"
+    return notes_path, meta_path
+
+
 def apply_evidence_cap(
     answer: str,
     evidence_text: str,
@@ -533,13 +676,16 @@ WORKING_EXAM_SECTION_HINTS: tuple[str, ...] = (
     "口诀",
     "对比",
     "参考层",
+    "边界",
 )
 
-# Internalized knowledge — synced into long_term_notes each study round.
+# Internalized knowledge — written into long_term_notes after chapter mastery only.
 CORE_MEMORY_SECTION_HINTS: tuple[str, ...] = (
     "知识框架",
     "核心概念",
     "关键术语",
+    "机制",
+    "边界",
 )
 
 
@@ -775,12 +921,18 @@ def select_exam_notes(
     # Body budget split; leave headroom for closed-book preamble (trimmed to max_chars).
     _sum_cap = 0.95
     lt_ratio = min(max(settings.exam_long_term_ratio, 0.0), 0.95)
-    wl_ratio = min(max(settings.exam_working_layer_ratio, 0.0), 0.5)
+    wl_ratio = min(max(settings.exam_working_layer_ratio, 0.0), 0.95)
     if lt_ratio + wl_ratio > _sum_cap:
         wl_ratio = max(0.0, _sum_cap - lt_ratio)
+    if lt_ratio <= 0.0 or not (long_term_notes or "").strip():
+        lt_ratio = 0.0
+        wl_ratio = min(wl_ratio, _sum_cap)
 
     lt_budget = int(max_chars * lt_ratio)
     wl_budget = int(max_chars * wl_ratio)
+    if lt_budget <= 120 and wl_budget > 0:
+        wl_budget = min(int(max_chars * _sum_cap), wl_budget + lt_budget)
+        lt_budget = 0
     parts: list[str] = []
 
     if long_term_notes.strip() and lt_budget > 120:
@@ -829,19 +981,103 @@ def exam_notes_char_budget() -> int:
     return get_settings().student_notes_max_chars
 
 
-def format_wrong_qa_feedback(qa_list: list[dict], *, max_items: int = 8) -> str:
+STUDY_NOTES_RATIO_MIN = 1.5
+STUDY_NOTES_RATIO_MAX = 2.0
+
+
+def effective_study_notes_ratio() -> float:
+    """Clamp configured ratio to the supported 1.5–2.0 band."""
+    settings = get_settings()
+    ratio = float(settings.study_notes_target_ratio)
+    return max(STUDY_NOTES_RATIO_MIN, min(STUDY_NOTES_RATIO_MAX, ratio))
+
+
+def compute_study_notes_budget(
+    material_chars: int,
+    *,
+    prior_chars: int = 0,
+) -> tuple[int, int]:
+    """Return (notes_max_chars, target_chars) from material length and settings.
+
+    Target length is material × ratio (ratio clamped to 1.5–2.0). When revising
+    within the same chapter, the budget never shrinks below existing notes.
+    """
+    settings = get_settings()
+    ratio = effective_study_notes_ratio()
+    hard_max = max(5000, int(settings.study_notes_hard_max_chars))
+    base_floor = max(500, int(settings.short_term_notes_max_chars))
+    target = int(material_chars * ratio) if material_chars > 0 else base_floor
+    if prior_chars > 0:
+        target = max(target, prior_chars)
+    effective_cap = max(hard_max, prior_chars) if prior_chars > 0 else hard_max
+    notes_max = min(max(base_floor, target, prior_chars or 0), effective_cap)
+    return notes_max, target
+
+
+def cap_study_notes(text: str, max_chars: int) -> str:
+    """Trim notes to max length using section-aware truncation."""
+    text = sanitize_prior_study_notes(text or "")
+    if len(text) <= max_chars:
+        return text
+    trimmed = _truncate_sections(text, max_chars)
+    if len(trimmed) <= max_chars:
+        return trimmed
+    return trimmed[: max_chars - 24].rstrip() + "\n\n…（笔记已达长度上限）"
+
+
+def guard_incremental_notes(
+    prior: str,
+    revised: str,
+    *,
+    notes_max_chars: int,
+    min_retention_ratio: float = 0.82,
+) -> str:
+    """If the model shrinks notes too much, keep prior and append revisions."""
+    prior = sanitize_prior_study_notes(prior or "")
+    revised = sanitize_prior_study_notes(revised or "")
+    if not prior:
+        return cap_study_notes(revised, notes_max_chars)
+    if not revised:
+        return cap_study_notes(prior, notes_max_chars)
+    if len(revised) >= len(prior) * min_retention_ratio:
+        return cap_study_notes(revised, notes_max_chars)
+
+    appendix_header = "## 本轮增补与修正"
+    appendix = f"\n\n{appendix_header}\n{revised}"
+    merged = prior + appendix
+    if len(merged) <= notes_max_chars:
+        return merged
+    room = notes_max_chars - len(prior) - len(appendix_header) - 4
+    if room > 200:
+        trimmed = revised[: room - 3] + "…"
+        return cap_study_notes(f"{prior}\n\n{appendix_header}\n{trimmed}", notes_max_chars)
+    return cap_study_notes(prior, notes_max_chars)
+
+
+def format_wrong_qa_feedback(
+    qa_list: list[dict],
+    *,
+    max_items: int = 8,
+    reason_max_chars: int = 600,
+    answer_max_chars: int = 400,
+) -> str:
     """Summarize wrong answers from the last exam for targeted study."""
     wrong = [q for q in qa_list if not q.get("is_correct")]
     if not wrong:
         return ""
-    lines = ["## 上轮错题（请在笔记中重点补强）"]
+    lines = ["## 上轮错题（请在笔记中重点补强，含完整失分理由）"]
     for q in wrong[:max_items]:
         topic = q.get("topic_tag") or q.get("weak_topic_focus") or "未分类"
-        reason = (q.get("judge_reason") or "").strip()[:120]
+        reason = (q.get("judge_reason") or "").strip()
+        if len(reason) > reason_max_chars:
+            reason = reason[: reason_max_chars - 3] + "…"
+        answer = (q.get("answer") or "").strip()
+        if len(answer) > answer_max_chars:
+            answer = answer[: answer_max_chars - 3] + "…"
         lines.append(
-            f"- **{topic}**：{q.get('question', '')[:160]}\n"
-            f"  - 你的回答：{(q.get('answer') or '')[:120]}\n"
-            f"  - 失分原因：{reason or '未记录'}"
+            f"- **{topic}**：{q.get('question', '')[:200]}\n"
+            f"  - 你的回答：{answer or '（空）'}\n"
+            f"  - 失分原因（完整）：{reason or '未记录'}"
         )
     if len(wrong) > max_items:
         lines.append(f"- …另有 {len(wrong) - max_items} 道错题")
@@ -998,7 +1234,12 @@ def build_chapter_study_context(
     short_term_notes: str,
     max_chars: int,
 ) -> str:
-    """Sliding window: long-term summaries + prior short-term notes + current chapter."""
+    """Sliding window for study: prior short-term notes + current chapter material.
+
+    Long-term memory is NOT injected here — it is only written after chapter
+    mastery and consumed at closed-book exam, not during study rounds.
+    """
+    _ = long_term_notes  # kept for API compatibility; intentionally unused in study
     ch = current_chapter(chapter_registry, current_chapter_index)
     if not ch:
         return build_study_context(
@@ -1010,26 +1251,23 @@ def build_chapter_study_context(
         )
 
     current_chunks = chunks_for_chapter(raw_chunks, ch["chapter_id"])
-    chunk_budget = max(max_chars * 2 // 3, 1000)
+    chunk_budget = max(int(max_chars * 0.55), 1000)
     from src.tools.web_fetch import material_context
 
     chunk_text = material_context(current_chunks, max_chars=chunk_budget)
     material_budget = max(max_chars - len(chunk_text) - 400, 400)
     material_excerpt = (study_material or "").strip()[:material_budget]
 
-    lt_budget = min(800, max_chars // 5)
-    st_budget = min(1200, max_chars // 4)
-    lt = _truncate_sections(long_term_notes or "", lt_budget)
+    # Prior notes: up to ~35% of window (full notes live in state; LLM also gets prior in revise prompt)
+    st_budget = min(max(int(max_chars * 0.35), 800), 4000)
     st = _truncate_sections(short_term_notes or "", st_budget)
 
     parts = [
         f"【当前章节】{chapter_label(chapter_registry, current_chapter_index)}。"
         "请只学习本章内容，不要超前。",
     ]
-    if lt:
-        parts.append(f"## 长期记忆（已掌握章节摘要）\n{lt}")
     if st:
-        parts.append(f"## 短期记忆（上轮本章笔记，请在此基础上增量完善）\n{st}")
+        parts.append(f"## 本章工作笔记（请在此基础上增量修订）\n{st}")
     if material_excerpt:
         parts.append(f"## 本章整理资料\n{material_excerpt}")
     parts.append(f"## 本章原文\n{chunk_text}")
@@ -1044,17 +1282,23 @@ def chapter_exam_accuracy(
     scored: list[dict],
     chapter_id: str,
     chunks: list[dict],
-) -> float:
-    """Weighted accuracy for questions whose evidence belongs to the chapter."""
+) -> tuple[float, int, int]:
+    """Weighted accuracy for questions whose evidence belongs to the chapter.
+
+    Returns (accuracy, relevant_count, total_scored).
+    """
     chunk_ids = {c["id"] for c in chunks if c.get("chapter_id") == chapter_id}
     if not chunk_ids:
-        return weighted_accuracy(scored)
+        return weighted_accuracy(scored), len(scored), len(scored)
     relevant = [
         q
         for q in scored
         if chunk_ids.intersection(set(q.get("evidence_refs") or []))
     ]
-    return weighted_accuracy(relevant) if relevant else 0.0
+    if not relevant:
+        # Fallback: avoid chart-dropping 0% when evidence_refs lack chapter_id tags
+        return weighted_accuracy(scored), 0, len(scored)
+    return weighted_accuracy(relevant), len(relevant), len(scored)
 
 
 def maybe_advance_chapter(

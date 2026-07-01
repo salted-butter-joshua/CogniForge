@@ -25,8 +25,9 @@ class RunParams(BaseModel):
     questions_per_persona: int = Field(5, ge=1, le=30)
 
     closed_book_exam: bool = True
-    student_notes_max_chars: int = Field(6000, ge=500, le=20000)
+    student_notes_max_chars: int = Field(6000, ge=500, le=50000)
     student_notes_study_max_chars: int = Field(8000, ge=1000, le=50000)
+    student_material_study_max_chars: int = Field(6000, ge=1000, le=100000)
     curriculum_pages_per_round: int = Field(12, ge=1, le=200)
     judge_evidence_only: bool = True
     evidence_cap_score: float = Field(0.88, ge=0.5, le=1.0)
@@ -38,10 +39,12 @@ class RunParams(BaseModel):
     use_chapter_mastery: bool = True
     chapter_mastery_accuracy: float = Field(0.98, ge=0.5, le=1.0)
     short_term_notes_max_chars: int = Field(6000, ge=500, le=50000)
-    long_term_notes_max_chars: int = Field(6000, ge=1000, le=50000)
+    study_notes_target_ratio: float = Field(1.75, ge=1.5, le=2.0)
+    study_notes_hard_max_chars: int = Field(50000, ge=5000, le=100000)
+    long_term_notes_max_chars: int = Field(6000, ge=0, le=50000)
     chapter_review_ratio: float = Field(0.1, ge=0.0, le=0.5)
-    exam_long_term_ratio: float = Field(0.50, ge=0.2, le=0.95)
-    exam_working_layer_ratio: float = Field(0.45, ge=0.0, le=0.5)
+    exam_long_term_ratio: float = Field(0.05, ge=0.0, le=0.95)
+    exam_working_layer_ratio: float = Field(0.90, ge=0.0, le=0.95)
     reinforce_pool_ratio: float = Field(0.5, ge=0.1, le=0.8)
 
     crawl_max_pages: int = Field(0, ge=0, le=500)

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import threading
-import time
 import uuid
 from typing import Any
 
 from src.api.event_bus import RunEventBus
 from src.api.models import RunParams, RunSummary
-from src.api.run_service import execute_run, load_summary, stop_run
+from src.api.run_service import execute_run, load_summary, mark_run_cancelling, stop_run
 from src.config import get_settings
 from src.models.router import validate_api_keys
 
@@ -30,6 +29,49 @@ class JobManager:
         with self._lock:
             return self._buses.get(run_id)
 
+    def _wait_for_thread(self, run_id: str, timeout: float = 120.0) -> bool:
+        thread = self._threads.get(run_id)
+        if thread and thread.is_alive():
+            thread.join(timeout=timeout)
+        return not (thread and thread.is_alive())
+
+    def _clear_stale_active(self) -> None:
+        """Drop active_run_id when the worker is gone or registry is terminal."""
+        with self._lock:
+            run_id = self._active_run_id
+            if not run_id:
+                return
+            summary = load_summary(run_id)
+            thread = self._threads.get(run_id)
+            alive = bool(thread and thread.is_alive())
+            if not alive:
+                self._active_run_id = None
+                return
+            if summary and summary.status not in ("running", "cancelling"):
+                self._active_run_id = None
+
+    def _ensure_previous_run_stopped(self, timeout: float = 120.0) -> None:
+        """Wait for a cancelling/stale worker before starting a new run."""
+        with self._lock:
+            prev_id = self._active_run_id
+        if not prev_id:
+            return
+
+        summary = load_summary(prev_id)
+        if summary and summary.status == "running":
+            raise RuntimeError(
+                f"Run {prev_id} is still active. Stop it first."
+            )
+
+        if not self._wait_for_thread(prev_id, timeout=timeout):
+            raise RuntimeError(
+                "Previous run is still stopping. Wait a moment and try again."
+            )
+
+        with self._lock:
+            if self._active_run_id == prev_id:
+                self._active_run_id = None
+
     def start_run(self, params: RunParams, label: str = "") -> tuple[str, str]:
         ok, err = validate_api_keys(get_settings())
         if not ok:
@@ -38,13 +80,8 @@ class JobManager:
                 or "LLM API key not configured. Copy .env.example to .env and set MINIMAX_API_KEY (or another provider key)."
             )
 
-        with self._lock:
-            if self._active_run_id:
-                active = load_summary(self._active_run_id)
-                if active and active.status == "running":
-                    raise RuntimeError(
-                        f"Run {self._active_run_id} is still active. Stop it first."
-                    )
+        self._clear_stale_active()
+        self._ensure_previous_run_stopped()
 
         run_id = uuid.uuid4().hex[:12]
         if not params.task_id:
@@ -76,10 +113,18 @@ class JobManager:
         run_id = self.active_run_id
         if not run_id:
             return False
+
+        summary = mark_run_cancelling(run_id)
         stop_run()
         bus = self.get_bus(run_id)
         if bus:
-            bus.publish({"type": "stop_requested", "message": "停止信号已发送"})
+            payload: dict[str, Any] = {
+                "type": "stop_requested",
+                "message": "停止信号已发送",
+            }
+            if summary:
+                payload["summary"] = summary.model_dump()
+            bus.publish(payload)
         return True
 
     def wait_for_events(self, run_id: str, timeout: float = 30.0) -> Any:

@@ -121,8 +121,20 @@ export default function LearningCurve({
                 y={targetAccuracy * 100}
                 stroke="#fbbf24"
                 strokeDasharray="6 4"
-                label={{ value: `目标 ${(targetAccuracy * 100).toFixed(0)}%`, fill: "#fbbf24", fontSize: 11 }}
+                label={{ value: `全局目标 ${(targetAccuracy * 100).toFixed(0)}%`, fill: "#fbbf24", fontSize: 11 }}
               />
+              {learningMode === "chapter_mastery" && (
+                <ReferenceLine
+                  y={chapterMasteryAccuracy * 100}
+                  stroke="#34d399"
+                  strokeDasharray="4 4"
+                  label={{
+                    value: `章节过关 ${(chapterMasteryAccuracy * 100).toFixed(0)}%`,
+                    fill: "#34d399",
+                    fontSize: 11,
+                  }}
+                />
+              )}
               {seriesKeys.map((key, i) => (
                 <Line
                   key={key}
@@ -187,9 +199,17 @@ function RoundTooltip({
               {typeof rec.chapter_accuracy === "number"
                 ? ` · 章正确率 ${(rec.chapter_accuracy * 100).toFixed(1)}%`
                 : ""}
+              {typeof rec.plain_accuracy === "number"
+                ? ` ·  plain ${(rec.plain_accuracy * 100).toFixed(1)}%`
+                : ""}
             </div>
           ) : (
             <div style={{ color: "#aeb3dc" }}>课程窗口：L{rec.curriculum_level}</div>
+          )}
+          {rec.judge_anomaly && (
+            <div style={{ color: "#f87171", marginTop: 4 }}>
+              ⚠ Judge 异常：{rec.judge_anomaly_reason || "评分可能未生效"}
+            </div>
           )}
           {topics.length > 0 && (
             <div style={{ marginTop: 4, color: "#aeb3dc" }}>
@@ -245,7 +265,56 @@ function RoundDetail({ record, picked }: { record: RoundRecord | null; picked: b
           <span className="rd-label">加权正确率</span>
           {(record.accuracy * 100).toFixed(1)}%
         </div>
+        {typeof record.plain_accuracy === "number" && (
+          <div>
+            <span className="rd-label">plain 正确率</span>
+            {(record.plain_accuracy * 100).toFixed(1)}%
+          </div>
+        )}
       </div>
+      {(record.judge_anomaly ||
+        record.reinforce_wrong ||
+        record.long_term_notes_chars != null) && (
+        <div className="round-detail-grid">
+          {record.judge_anomaly && (
+            <div style={{ gridColumn: "1 / -1", color: "#f87171" }}>
+              <span className="rd-label">Judge 异常</span>
+              {record.judge_anomaly_reason || "全部 0 分且无评分理由"}
+              {record.empty_judge_reason_count != null &&
+                ` · 空理由 ${record.empty_judge_reason_count}/${record.question_count}`}
+            </div>
+          )}
+          {record.reinforce_wrong != null && (
+            <div>
+              <span className="rd-label">巩固题</span>
+              对 {record.reinforce_correct ?? 0} / 错 {record.reinforce_wrong ?? 0}
+            </div>
+          )}
+          {record.long_term_notes_chars != null && (
+            <div>
+              <span className="rd-label">记忆字符</span>
+              长期 {record.long_term_notes_chars} · 工作 {record.short_term_notes_chars ?? 0}
+            </div>
+          )}
+          {record.chapter_relevant_count != null && (
+            <div>
+              <span className="rd-label">章内题</span>
+              {record.chapter_relevant_count}/{record.chapter_total_scored ?? record.question_count}
+              {record.chapter_evidence_fallback ? "（证据未标章，已回退全量）" : ""}
+            </div>
+          )}
+        </div>
+      )}
+      {record.settings_snapshot && (
+        <div className="round-detail-row" style={{ fontSize: "0.85rem", color: "#aeb3dc" }}>
+          <span className="rd-label">当轮参数</span>
+          章门槛{" "}
+          {((record.settings_snapshot.chapter_mastery_accuracy as number) * 100).toFixed(0)}%
+          · Judge T={String(record.settings_snapshot.judge_temperature)}
+          · 语义宽松={String(record.settings_snapshot.judge_semantic_lenient)}
+          · 长期记忆占比={String(record.settings_snapshot.exam_long_term_ratio)}
+        </div>
+      )}
       {topics.length > 0 && (
         <div className="round-detail-row">
           <span className="rd-label">题型分布</span>
@@ -263,6 +332,24 @@ function RoundDetail({ record, picked }: { record: RoundRecord | null; picked: b
             <span key={t} className="rd-chip warn">
               {t}
             </span>
+          ))}
+        </div>
+      )}
+      {record.wrong_samples && record.wrong_samples.length > 0 && (
+        <div className="round-detail-wrong-list">
+          <div className="rd-label" style={{ marginBottom: 8 }}>
+            错题与完整 Judge 理由
+          </div>
+          {record.wrong_samples.map((w, i) => (
+            <div key={i} className="wrong-sample-block">
+              <div className="wrong-sample-q">{w.question}</div>
+              <div className="wrong-sample-a">
+                <span className="rd-label">答</span> {w.answer}
+              </div>
+              <div className="wrong-sample-r">
+                <span className="rd-label">评</span> {w.judge_reason || "（无理由）"}
+              </div>
+            </div>
           ))}
         </div>
       )}

@@ -109,13 +109,22 @@ def create_run(params: RunParams, label: str = "") -> RunCreateResponse:
 
 @app.post("/api/runs/{run_id}/stop")
 def stop_run_endpoint(run_id: str) -> dict:
+    summary = load_summary(run_id)
+    if summary and summary.status in ("cancelled", "success", "failed", "stagnated", "max_iter_reached", "interrupted"):
+        return {"ok": True, "message": "Run already finished"}
+    if summary and summary.status == "cancelling":
+        return {"ok": True, "message": "Stop already in progress"}
     if job_manager.active_run_id != run_id:
-        summary = load_summary(run_id)
         if summary and summary.status != "running":
             return {"ok": True, "message": "Run already finished"}
         raise HTTPException(404, "Run is not active")
     job_manager.stop_active()
-    return {"ok": True, "message": "Stop requested"}
+    updated = load_summary(run_id)
+    return {
+        "ok": True,
+        "message": "Stop requested",
+        "summary": updated.model_dump() if updated else None,
+    }
 
 
 @app.post("/api/runs/stop")

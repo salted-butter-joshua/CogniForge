@@ -29,6 +29,11 @@ class _Tracker:
         self.input = 0
         self.output = 0
         self.calls = 0
+        self._round_baseline_input = 0
+        self._round_baseline_output = 0
+        self._round_baseline_calls = 0
+        self._round_baseline_by_step: dict[str, int] = {}
+        self.round_history: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         with _lock:
@@ -36,6 +41,11 @@ class _Tracker:
             self.input = 0
             self.output = 0
             self.calls = 0
+            self._round_baseline_input = 0
+            self._round_baseline_output = 0
+            self._round_baseline_calls = 0
+            self._round_baseline_by_step = {}
+            self.round_history = []
 
     def add(self, step: str, inp: int, out: int) -> None:
         with _lock:
@@ -59,6 +69,48 @@ class _Tracker:
                 "token_calls": self.calls,
                 "tokens_by_step": {k: v["total"] for k, v in self.by_step.items()},
             }
+
+    def snapshot_round(self, macro_iter: int) -> dict[str, Any]:
+        """Capture per-round delta and cumulative totals (call once per macro iter)."""
+        with _lock:
+            cum_in = self.input
+            cum_out = self.output
+            round_in = max(0, cum_in - self._round_baseline_input)
+            round_out = max(0, cum_out - self._round_baseline_output)
+            round_total = round_in + round_out
+            cum_total = cum_in + cum_out
+
+            round_by_step: dict[str, int] = {}
+            for step, data in self.by_step.items():
+                prev = self._round_baseline_by_step.get(step, 0)
+                delta = data["total"] - prev
+                if delta > 0:
+                    round_by_step[step] = delta
+
+            record: dict[str, Any] = {
+                "macro_iter": macro_iter,
+                "token_round_total": round_total,
+                "token_round_input": round_in,
+                "token_round_output": round_out,
+                "token_cumulative_total": cum_total,
+                "token_cumulative_input": cum_in,
+                "token_cumulative_output": cum_out,
+                "token_calls_round": max(0, self.calls - self._round_baseline_calls),
+                "tokens_by_step_round": round_by_step,
+            }
+
+            self.round_history.append(record)
+            self._round_baseline_input = cum_in
+            self._round_baseline_output = cum_out
+            self._round_baseline_calls = self.calls
+            self._round_baseline_by_step = {
+                k: v["total"] for k, v in self.by_step.items()
+            }
+            return record
+
+    def round_history_snapshot(self) -> list[dict[str, Any]]:
+        with _lock:
+            return list(self.round_history)
 
 
 tracker = _Tracker()

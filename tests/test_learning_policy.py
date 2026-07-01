@@ -101,6 +101,57 @@ def test_select_exam_notes_prefers_short_term():
     assert "Pod" in out
 
 
+def test_build_chapter_study_context_omits_long_term():
+    from src.tools.learning_policy import build_chapter_study_context
+
+    registry = [{"chapter_id": "ch1", "chapter_title": "Intro", "chapter_order": 0}]
+    chunks = [
+        {
+            "id": "c1",
+            "chapter_id": "ch1",
+            "chapter_title": "Intro",
+            "title": "Intro",
+            "url": "http://example.com",
+            "content": "kubernetes pod 内容 " * 50,
+        }
+    ]
+    lt = "## 已掌握\n" + "long term block " * 80
+    st = "## 工作笔记\n" + "short notes " * 30
+    text = build_chapter_study_context(
+        raw_chunks=chunks,
+        chapter_registry=registry,
+        current_chapter_index=0,
+        study_material="整理资料",
+        long_term_notes=lt,
+        short_term_notes=st,
+        max_chars=4000,
+    )
+    assert "长期记忆" not in text
+    assert "工作笔记" in text
+    assert "本章原文" in text
+
+
+def test_exam_notes_reallocates_when_long_term_disabled():
+    import os
+
+    from src.config import get_settings
+    from src.tools.learning_policy import select_exam_notes
+
+    os.environ["EXAM_LONG_TERM_RATIO"] = "0"
+    os.environ["EXAM_WORKING_LAYER_RATIO"] = "0.95"
+    get_settings.cache_clear()
+    out = select_exam_notes(
+        notes="",
+        max_chars=1000,
+        long_term_notes="## old\nignored",
+        short_term_notes="## 自测\n" + "item " * 40,
+        chapter_title="Ch1",
+    )
+    assert "工作记忆·参考层" in out
+    assert "长期记忆·内化" not in out
+    get_settings.cache_clear()
+
+
 def test_build_chapter_registry_orders_unique():
     from src.tools.web_fetch import build_chapter_registry
 
@@ -124,8 +175,10 @@ def test_chapter_exam_accuracy_filters_by_evidence():
         {"persona_id": "P1", "is_correct": True, "evidence_refs": ["c1"]},
         {"persona_id": "P1", "is_correct": False, "evidence_refs": ["c2"]},
     ]
-    acc = chapter_exam_accuracy(scored, "ch1", chunks)
+    acc, rel, total = chapter_exam_accuracy(scored, "ch1", chunks)
     assert acc == 1.0
+    assert rel == 1
+    assert total == 2
 
 
 def test_all_chapters_mastered():
@@ -139,3 +192,59 @@ def test_all_chapters_mastered():
     assert not all_chapters_mastered(registry, mastery)
     mastery["b"]["mastered"] = True
     assert all_chapters_mastered(registry, mastery)
+
+
+def test_ensure_question_evidence_rebinds_mismatch():
+    from src.tools.learning_policy import ensure_question_evidence
+
+    chunks = [
+        {
+            "id": "chunk_1",
+            "title": "Pod",
+            "content": "Pod 是最小调度单元 namespace 隔离",
+        },
+        {
+            "id": "chunk_9",
+            "title": "ServiceAccount",
+            "content": "ServiceAccount SSA Name UID Namespace 绑定身份",
+        },
+    ]
+    question = "ServiceAccount 的 Name、UID、Namespace 分别表示什么？"
+    refs, overlap = ensure_question_evidence(
+        question,
+        ["chunk_1"],
+        chunks,
+        max_refs=1,
+    )
+    assert refs == ["chunk_9"]
+    assert overlap > 0.05
+
+
+def test_compute_study_notes_budget_extends_for_long_prior():
+    from src.tools.learning_policy import compute_study_notes_budget
+
+    notes_max, target = compute_study_notes_budget(2000, prior_chars=45000)
+    assert notes_max >= 45000
+    assert target >= 45000
+
+
+def test_cap_study_notes_uses_section_aware_trim():
+    from src.tools.learning_policy import cap_study_notes
+
+    text = "## A\n" + ("x" * 200) + "\n\n## B\n" + ("y" * 200)
+    out = cap_study_notes(text, 250)
+    assert len(out) <= 250
+    assert "## A" in out or "## B" in out
+    assert "笔记已达长度上限" in out or len(out) <= 250
+
+
+def test_study_notes_output_paths_stable():
+    from pathlib import Path
+
+    from src.tools.learning_policy import study_notes_output_paths
+
+    notes, meta = study_notes_output_paths(Path("/tmp/out"), chapter_id="ch-1")
+    assert notes.name == "study_notes_ch-1.md"
+    assert meta.name == "study_notes_ch-1_meta.json"
+    notes2, _ = study_notes_output_paths(Path("/tmp/out"))
+    assert notes2.name == "study_notes.md"

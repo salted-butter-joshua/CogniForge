@@ -1,5 +1,6 @@
 import {
   Activity,
+  Coins,
   FlaskConical,
   Play,
   Rocket,
@@ -25,13 +26,15 @@ import LogViewer from "./components/LogViewer";
 import ParamFields from "./components/ParamFields";
 import PipelineProgress from "./components/PipelineProgress";
 import RunHistoryPanel from "./components/RunHistoryPanel";
+import TokenUsagePanel from "./components/TokenUsagePanel";
 import TimingPanel from "./components/TimingPanel";
 import { useTiming } from "./hooks/useTiming";
 import type { CrawlPreview, ParamPreset, RunEvent, RunSummary, TabId } from "./types";
-import { formatDuration } from "./utils/format";
+import { formatDuration, formatTokens } from "./utils/format";
 import {
   clearActiveRunId,
   isTerminalStatus,
+  isActiveRunStatus,
   loadActiveRunId,
   loadActiveTab,
   saveActiveRunId,
@@ -54,6 +57,7 @@ export default function App() {
   const [activeSummary, setActiveSummary] = useState<RunSummary | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [apiKeysError, setApiKeysError] = useState<string | null>(null);
@@ -77,6 +81,12 @@ export default function App() {
     }
   }, []);
 
+  const finishActiveRun = useCallback((summary: RunSummary | null) => {
+    setActiveSummary(summary);
+    setActiveRunId(null);
+    clearActiveRunId();
+  }, []);
+
   const selectRun = useCallback(
     async (run: RunSummary, opts?: { switchTab?: TabId }) => {
       setActiveRunId(run.run_id);
@@ -90,13 +100,13 @@ export default function App() {
         const fresh = await getRun(run.run_id);
         setActiveSummary(fresh);
         if (isTerminalStatus(fresh.status)) {
-          clearActiveRunId();
+          finishActiveRun(fresh);
         }
       } catch {
         /* keep cached summary */
       }
     },
-    []
+    [finishActiveRun]
   );
 
   const restoreSession = useCallback(async () => {
@@ -124,7 +134,7 @@ export default function App() {
       setActiveSummary(summary);
       saveActiveRunId(candidate);
       const savedTab = loadActiveTab() as TabId | null;
-      const validTabs: TabId[] = ["launch", "logs", "curve", "compare"];
+      const validTabs: TabId[] = ["launch", "logs", "tokens", "curve", "compare"];
       if (savedTab && validTabs.includes(savedTab)) {
         setTab(savedTab);
       } else if (summary.status === "running") {
@@ -132,13 +142,13 @@ export default function App() {
         saveActiveTab("logs");
       }
       if (isTerminalStatus(summary.status)) {
-        clearActiveRunId();
+        finishActiveRun(summary);
       }
     } catch {
       /* ignore stale session */
-      clearActiveRunId();
+      finishActiveRun(null);
     }
-  }, [refreshRunHistory]);
+  }, [refreshRunHistory, finishActiveRun]);
 
   useEffect(() => {
     fetchHealth()
@@ -212,7 +222,9 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [urlsText, params.crawl_enabled, crawlMaxPagesTouched]);
 
-  const isRunning = activeSummary?.status === "running";
+  const isRunning = isActiveRunStatus(activeSummary?.status ?? "");
+  const isCancelling = activeSummary?.status === "cancelling";
+  const formLocked = isRunning;
 
   const timing = useTiming(events, activeSummary?.created_at, isRunning);
 
@@ -229,10 +241,14 @@ export default function App() {
     (raw: unknown) => {
       const e = raw as RunEvent;
       if (e.type === "_eof") return;
+      if (e.type === "stop_requested" && e.summary) {
+        setActiveSummary(e.summary);
+        return;
+      }
       if (e.type === "snapshot" && e.summary) {
         setActiveSummary(e.summary);
         if (isTerminalStatus(e.summary.status)) {
-          clearActiveRunId();
+          finishActiveRun(e.summary);
           refreshRunHistory();
         }
         return;
@@ -241,8 +257,7 @@ export default function App() {
         if (activeRunId) {
           getRun(activeRunId)
             .then((s) => {
-              setActiveSummary(s);
-              clearActiveRunId();
+              finishActiveRun(s);
               refreshRunHistory();
             })
             .catch(() => {});
@@ -251,7 +266,7 @@ export default function App() {
       }
       setEvents((prev) => [...prev.slice(-4000), e]);
     },
-    [activeRunId, refreshRunHistory]
+    [activeRunId, finishActiveRun, refreshRunHistory]
   );
 
   useEffect(() => {
@@ -266,17 +281,17 @@ export default function App() {
         .then((s) => {
           setActiveSummary(s);
           if (isTerminalStatus(s.status)) {
-            clearActiveRunId();
+            finishActiveRun(s);
             refreshRunHistory();
           }
         })
         .catch(() => {});
-    }, 5000);
+    }, 2000);
     return () => {
       unsub();
       clearInterval(poll);
     };
-  }, [activeRunId, handleEvent, refreshRunHistory]);
+  }, [activeRunId, handleEvent, finishActiveRun, refreshRunHistory]);
 
   const applyPreset = (preset: ParamPreset) => {
     setActivePreset(preset.id);
@@ -318,10 +333,32 @@ export default function App() {
 
   const handleStop = async () => {
     if (!activeRunId) return;
+    setStopping(true);
+    setError(null);
+    const runId = activeRunId;
     try {
-      await stopRun(activeRunId);
+      const summary = await stopRun(runId);
+      if (summary) {
+        setActiveSummary(summary);
+      } else {
+        setActiveSummary((prev) =>
+          prev ? { ...prev, status: "cancelling" } : prev
+        );
+      }
+      for (let i = 0; i < 120; i += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const s = await getRun(runId);
+        setActiveSummary(s);
+        if (isTerminalStatus(s.status)) {
+          finishActiveRun(s);
+          break;
+        }
+      }
+      await refreshRunHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : "停止失败");
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -335,6 +372,7 @@ export default function App() {
   const navItems: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "launch", label: "启动", icon: <Rocket size={17} /> },
     { id: "logs", label: "监控", icon: <ScrollText size={17} /> },
+    { id: "tokens", label: "Token", icon: <Coins size={17} /> },
     { id: "curve", label: "曲线", icon: <Activity size={17} /> },
     { id: "compare", label: "对比", icon: <FlaskConical size={17} /> },
   ];
@@ -348,6 +386,10 @@ export default function App() {
       title: "运行监控",
       sub: "实时耗时、流水线进度与 LangGraph 步骤日志",
     },
+    tokens: {
+      title: "Token 用量",
+      sub: "逐轮增量与累计 Token，按 pipeline 节点分布",
+    },
     curve: {
       title: "学习曲线",
       sub: "按宏观迭代轮次展示 Judge 加权正确率",
@@ -360,6 +402,7 @@ export default function App() {
 
   const statusLabel: Record<string, string> = {
     running: "运行中",
+    cancelling: "正在停止",
     success: "成功",
     failed: "失败",
     cancelled: "已取消",
@@ -466,7 +509,7 @@ export default function App() {
                     <label>学习 URL</label>
                     <textarea
                       value={urlsText}
-                      disabled={isRunning}
+                      disabled={formLocked}
                       onChange={(e) => {
                         setCrawlMaxPagesTouched(false);
                         setUrlsText(e.target.value);
@@ -520,7 +563,7 @@ export default function App() {
                                 type="button"
                                 className="btn btn-ghost"
                                 style={{ marginLeft: 8, padding: "2px 8px" }}
-                                disabled={isRunning}
+                                disabled={formLocked}
                                 onClick={() =>
                                   setParam(
                                     "crawl_max_pages",
@@ -541,7 +584,7 @@ export default function App() {
                     <input
                       type="text"
                       value={goal}
-                      disabled={isRunning}
+                      disabled={formLocked}
                       onChange={(e) => setGoal(e.target.value)}
                     />
                   </div>
@@ -550,23 +593,28 @@ export default function App() {
                     <input
                       type="text"
                       value={label}
-                      disabled={isRunning}
+                      disabled={formLocked}
                       onChange={(e) => setLabel(e.target.value)}
                       placeholder="用于曲线对比，如：调试-50题"
                     />
                   </div>
                   <div className="action-bar">
+                    {isCancelling && (
+                      <p className="field-hint" style={{ margin: 0, flex: 1 }}>
+                        正在等待后台停止（可修改参数；完全停止后可启动新任务）
+                      </p>
+                    )}
                     <button
                       className="btn btn-primary"
-                      disabled={isRunning || starting}
+                      disabled={isRunning || starting || stopping}
                       onClick={handleStart}
                     >
                       <Play size={17} />
-                      {starting ? "启动中…" : "启动学习 Loop"}
+                      {starting ? "启动中…" : stopping ? "等待停止…" : "启动学习 Loop"}
                     </button>
                     <button
                       className="btn btn-danger"
-                      disabled={!isRunning}
+                      disabled={!isRunning || stopping}
                       onClick={handleStop}
                     >
                       <Square size={15} fill="currentColor" />
@@ -584,7 +632,7 @@ export default function App() {
                         key={p.id}
                         type="button"
                         className={`preset-chip ${activePreset === p.id ? "active" : ""}`}
-                        disabled={isRunning}
+                        disabled={formLocked}
                         title={p.description}
                         onClick={() => applyPreset(p)}
                       >
@@ -598,7 +646,7 @@ export default function App() {
                     fields={fields}
                     values={params}
                     onChange={setParam}
-                    disabled={isRunning}
+                    disabled={formLocked}
                   />
                 </div>
               </div>
@@ -695,6 +743,42 @@ export default function App() {
               roundRecords={activeSummary?.round_records}
               chapterProgress={activeSummary?.chapter_progress}
               learningMode={activeSummary?.learning_mode}
+            />
+          </div>
+        )}
+
+        {tab === "tokens" && (
+          <div className="content-scroll">
+            {!activeSummary && (
+              <div className="alert" style={{ marginBottom: 16 }}>
+                暂无选中任务。请从左侧「历史运行」选择记录，或启动新任务后查看 Token 用量。
+              </div>
+            )}
+            {activeSummary && (
+              <div className="metric-cards" style={{ marginBottom: 20 }}>
+                <MetricCard label="任务" value={activeSummary.task_id} compact />
+                <MetricCard
+                  label="累计 Token"
+                  value={formatTokens(activeSummary.token_total ?? 0)}
+                  gold
+                  live={isRunning}
+                />
+                <MetricCard
+                  label="宏观轮次"
+                  value={`M${String(activeSummary.macro_iter + 1).padStart(3, "0")}`}
+                />
+                <MetricCard
+                  label="状态"
+                  value={statusLabel[activeSummary.status] ?? activeSummary.status}
+                />
+              </div>
+            )}
+            <TokenUsagePanel
+              roundRecords={activeSummary?.round_records}
+              liveTokenTotal={activeSummary?.token_total ?? 0}
+              liveTokenInput={activeSummary?.token_input ?? 0}
+              liveTokenOutput={activeSummary?.token_output ?? 0}
+              isRunning={!!isRunning}
             />
           </div>
         )}

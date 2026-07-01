@@ -65,9 +65,11 @@ export async function startRun(body: Record<string, unknown>): Promise<{
   return r.json();
 }
 
-export async function stopRun(runId: string): Promise<void> {
+export async function stopRun(runId: string): Promise<RunSummary | null> {
   const r = await fetch(`${API}/runs/${runId}/stop`, { method: "POST" });
   if (!r.ok) throw new Error("Failed to stop run");
+  const data = await r.json().catch(() => ({}));
+  return (data.summary as RunSummary | undefined) ?? null;
 }
 
 export function subscribeEvents(

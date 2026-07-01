@@ -31,16 +31,21 @@ from src.tools.learning_policy import (
     build_chapter_study_context,
     build_learning_journal,
     build_study_context,
+    cap_study_notes,
     chapter_label,
     chunks_for_chapter,
+    compute_study_notes_budget,
     current_chapter,
     curriculum_chunks,
     curriculum_delta_chunks,
     curriculum_page_range_label,
+    effective_study_notes_ratio,
     format_wrong_qa_feedback,
+    guard_incremental_notes,
     init_chapter_mastery_dict,
     is_chapter_mastery_mode,
-    sync_chapter_long_term_notes,
+    sanitize_prior_study_notes,
+    study_notes_output_paths,
     upsert_chapter_long_term_block,
 )
 
@@ -235,74 +240,155 @@ def generate_material(state: LearnLoopState) -> dict:
         return {"status": "failed", "error_message": str(exc)}
 
 
+
+def _study_notes_structure_hint() -> str:
+    return """记忆分层要求（必须按此结构输出 Markdown）：
+1. **## 知识框架** 与 **## 核心概念与要点** — 完整、详尽，用于学习过程与最终归档（闭卷时不可全文查阅）
+2. **## 机制与边界条件** — 写清「什么情况下成立 / 不成立」、触发条件、默认行为 vs 需手动开启的行为（避免模糊词如「会自动提示」而不说明拒绝/报错）
+3. **## 薄弱点强化梳理**、**## 待澄清 / 易混淆点** — 含易错机制（如：冲突≠管理不同字段；SSA 默认拒绝 apply 而非仅警告）
+4. **## 自测要点** — 5 条检验题，含 1–2 道「边界/否定案例」题
+5. 可选 **## 关键术语速查** — 术语对照表
+
+准确性要求：
+- 用自己的话组织，但**机制描述必须与资料一致**；不确定处写入「待澄清」，不要编造看似合理的因果
+- 不要大段照抄原文或完整 YAML/配置
+- 可适度外延（对比、类比、操作后果），但**不得引入资料未支持的新机制或错误边界**"""
+
+
 @llm_retry()
+def _study_llm_initial(
+    material: str,
+    weak_topics: list[str],
+    *,
+    notes_max_chars: int,
+    notes_target_chars: int,
+    material_chars: int,
+    macro_iter: int,
+    scope_label: str,
+    wrong_feedback: str = "",
+) -> str:
+    """First study round for a chapter — create notes from scratch."""
+    llm = student_llm()
+    weak_text = ", ".join(weak_topics) if weak_topics else "无"
+    ratio = effective_study_notes_ratio()
+    wrong_section = f"\n{wrong_feedback.strip()}\n" if wrong_feedback.strip() else ""
+
+    prompt = f"""你是认真严谨的学习者 A。请在充分理解以下资料的基础上，整理一份清晰、专业且易懂的学习笔记。
+
+{_study_notes_structure_hint()}
+
+篇幅要求（重要）：
+- 本次学习资料约 {material_chars} 字；笔记目标篇幅约 **{notes_target_chars} 字**（约为资料的 {ratio:.2f} 倍，允许 1.5–2.0 倍外延展开）
+- 上限 {notes_max_chars} 字；**不要写短笔记**，核心概念需充分展开（机制、对比、反例、操作后果）
+- 宁可写满目标篇幅，也不要只写摘要式 bullet
+
+其他：
+- 当前为第 {macro_iter + 1} 轮学习，**本章首次整理笔记**（从零撰写，勿引用不存在的「上轮笔记」）
+- {scope_label}；只学本窗口内容
+
+薄弱点（需重点强化）：{weak_text}
+{wrong_section}
+学习资料（与课程解锁窗口对齐，约 {material_chars} 字）：
+
+{material}
+
+输出 Markdown，必须包含：知识框架、核心概念与要点、机制与边界条件、薄弱点强化梳理、待澄清/易混淆点、自测要点（恰好 5 条）"""
+
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    return cap_study_notes(llm_content_to_str(resp.content), notes_max_chars)
+
+
+@llm_retry()
+def _study_llm_revise(
+    material: str,
+    weak_topics: list[str],
+    *,
+    prior_notes: str,
+    notes_max_chars: int,
+    notes_target_chars: int,
+    material_chars: int,
+    macro_iter: int,
+    scope_label: str,
+    wrong_feedback: str = "",
+) -> str:
+    """Same-chapter follow-up — revise and extend prior notes, do not rewrite from scratch."""
+    llm = student_llm()
+    weak_text = ", ".join(weak_topics) if weak_topics else "无"
+    ratio = effective_study_notes_ratio()
+    prior_body = sanitize_prior_study_notes(prior_notes)
+    prior_len = len(prior_body)
+    wrong_section = f"\n{wrong_feedback.strip()}\n" if wrong_feedback.strip() else ""
+
+    prompt = f"""你是认真严谨的学习者 A。你正在**同一章节的多轮学习**中维护一份工作笔记。
+
+## 任务（增量修订，禁止整篇重写）
+- **必须**在下方「当前章节笔记（完整）」基础上修订：保留已有正确内容，仅修正错误、补充遗漏、强化薄弱点与边界条件
+- **禁止**清空结构、缩写成摘要、或另起炉灶重写
+- 输出必须是**合并后的完整笔记**（含所有章节标题），不是 diff、不是变更说明
+- 篇幅应 **≥ {prior_len} 字**，目标 **{notes_target_chars} 字**，上限 **{notes_max_chars} 字**
+- 资料约 {material_chars} 字；笔记相对资料约 {ratio:.2f} 倍，可适度外延对比/后果，但不得捏造机制
+
+{_study_notes_structure_hint()}
+
+修订重点：
+- 对照学习资料与上轮错题，修正机制/边界描述错误
+- 在「机制与边界条件」「待澄清/易混淆点」「自测要点」中补充否定案例与触发条件
+- 若某节已完整且无误，**原样保留**，不要为改而改
+
+当前为第 {macro_iter + 1} 轮学习 · {scope_label}（仍为同一章，勿切换到其他章内容）
+薄弱点（需重点强化）：{weak_text}
+{wrong_section}
+## 当前章节笔记（完整，请在此基础上修订）
+{prior_body}
+
+## 学习资料（约 {material_chars} 字，用于核对与补漏）
+{material}
+
+输出合并后的完整 Markdown 笔记（保留上述结构，总长不超过 {notes_max_chars} 字）。"""
+
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    revised = llm_content_to_str(resp.content).strip()
+    return guard_incremental_notes(
+        prior_body,
+        revised,
+        notes_max_chars=notes_max_chars,
+    )
+
+
 def _study_llm(
     material: str,
     weak_topics: list[str],
     *,
     notes_max_chars: int,
+    notes_target_chars: int,
+    material_chars: int,
     macro_iter: int,
     scope_label: str,
     prior_notes: str = "",
     wrong_feedback: str = "",
 ) -> str:
-
-    llm = student_llm()
-
-    weak_text = ", ".join(weak_topics) if weak_topics else "无"
-    prior_section = ""
     if prior_notes.strip():
-        prior_section = f"""
-## 上轮笔记（请在此基础上增量完善、查漏补缺）
-{prior_notes.strip()[: notes_max_chars // 2]}
-
-"""
-    wrong_section = ""
-    if wrong_feedback.strip():
-        wrong_section = f"""
-{wrong_feedback.strip()}
-
-"""
-
-    prompt = f"""你是认真严谨的学习者 A。请在充分理解以下资料的基础上，整理一份清晰、专业且易懂的学习笔记。
-
-记忆分层要求（必须按此结构输出 Markdown）：
-1. **## 知识框架** 与 **## 核心概念与要点** — 完整、详尽，用于学习过程与最终归档（闭卷时不可全文查阅）
-2. **## 薄弱点强化梳理**、**## 待澄清 / 易混淆点** — 可标注为浅层参考，闭卷时仅这部分的摘录可辅助回忆
-3. **## 自测要点** — 5 条检验题，属于浅层参考层（闭卷时可看摘录，非完整笔记）
-4. 可选 **## 关键术语速查** — 术语对照表，属于浅层参考层
-
-要求：
-- 在理解之后用自己的话条理化组织，知识点结构清晰、层次分明
-- 完整覆盖本课程窗口的核心要点，不遗漏关键概念
-- 对资料未讲透或你存疑之处，在「待澄清」中明确标注并补全理解
-- 表述准确专业，同时通俗易懂；不要大段照抄原文或完整 YAML/配置
-- 总长度不超过 {notes_max_chars} 字
-- 当前为第 {macro_iter + 1} 轮学习，在上一轮笔记基础上增量完善、查漏补缺
-- {scope_label}；只学本窗口内容，不要编造未提供章节
-
-薄弱点（需重点强化）：{weak_text}
-{prior_section}{wrong_section}
-学习资料（与课程解锁窗口对齐）：
-
-{material}
-
-输出 Markdown，必须包含以下章节标题（顺序可调整）：
-1. 知识框架
-2. 核心概念与要点
-3. 薄弱点强化梳理
-4. 待澄清 / 易混淆点
-5. 自测要点（恰好 5 条）"""
-
-    resp = llm.invoke([HumanMessage(content=prompt)])
-
-    notes = llm_content_to_str(resp.content)
-
-    if len(notes) > notes_max_chars:
-
-        notes = notes[:notes_max_chars] + "\n\n…（笔记已达长度上限，部分细节未记录）"
-
-    return notes
+        return _study_llm_revise(
+            material,
+            weak_topics,
+            prior_notes=prior_notes,
+            notes_max_chars=notes_max_chars,
+            notes_target_chars=notes_target_chars,
+            material_chars=material_chars,
+            macro_iter=macro_iter,
+            scope_label=scope_label,
+            wrong_feedback=wrong_feedback,
+        )
+    return _study_llm_initial(
+        material,
+        weak_topics,
+        notes_max_chars=notes_max_chars,
+        notes_target_chars=notes_target_chars,
+        material_chars=material_chars,
+        macro_iter=macro_iter,
+        scope_label=scope_label,
+        wrong_feedback=wrong_feedback,
+    )
 
 
 def student_study(state: LearnLoopState) -> dict:
@@ -319,7 +405,6 @@ def student_study(state: LearnLoopState) -> dict:
         idx = int(state.get("current_chapter_index", 0) or 0)
         scope_label = chapter_label(registry, idx)
         prior = state.get("short_term_notes") or state.get("study_notes") or ""
-        notes_max = settings.short_term_notes_max_chars
         study_ctx = build_chapter_study_context(
             raw_chunks=raw_chunks,
             chapter_registry=registry,
@@ -329,19 +414,26 @@ def student_study(state: LearnLoopState) -> dict:
             short_term_notes=prior,
             max_chars=settings.student_material_study_max_chars,
         )
+        notes_max, notes_target = compute_study_notes_budget(
+            len(study_ctx),
+            prior_chars=len(prior),
+        )
     else:
         curriculum_level = state.get("curriculum_level", 0)
         scope_label = curriculum_page_range_label(
             curriculum_level, settings.curriculum_pages_per_round
         )
         prior = state.get("study_notes") or ""
-        notes_max = settings.student_notes_study_max_chars
         study_ctx = build_study_context(
             raw_chunks=raw_chunks,
             study_material=state.get("study_material") or "",
             curriculum_level=curriculum_level,
             pages_per_round=settings.curriculum_pages_per_round,
             max_chars=settings.student_material_study_max_chars,
+        )
+        notes_max, notes_target = compute_study_notes_budget(
+            len(study_ctx),
+            prior_chars=len(prior),
         )
 
     try:
@@ -351,10 +443,13 @@ def student_study(state: LearnLoopState) -> dict:
             max_items=8,
         )
 
+        study_mode = "revise" if prior.strip() else "initial"
         notes = _study_llm(
             study_ctx,
             weak,
             notes_max_chars=notes_max,
+            notes_target_chars=notes_target,
+            material_chars=len(study_ctx),
             macro_iter=macro,
             scope_label=scope_label,
             prior_notes=prior,
@@ -365,7 +460,35 @@ def student_study(state: LearnLoopState) -> dict:
 
         out = ensure_output_dir(task_id)
 
-        (out / f"study_notes_iter_{macro}.md").write_text(notes, encoding="utf-8")
+        chapter_id = None
+        if is_chapter_mastery_mode():
+            registry = state.get("chapter_registry") or []
+            idx = int(state.get("current_chapter_index", 0) or 0)
+            ch = current_chapter(registry, idx)
+            chapter_id = (ch or {}).get("chapter_id")
+
+        notes_path, meta_path = study_notes_output_paths(out, chapter_id=chapter_id)
+        notes_path.write_text(notes, encoding="utf-8")
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "macro_iter": macro,
+                    "study_mode": study_mode,
+                    "chapter_id": chapter_id,
+                    "prior_notes_chars": len(prior),
+                    "material_chars": len(study_ctx),
+                    "notes_chars": len(notes),
+                    "notes_target_chars": notes_target,
+                    "notes_max_chars": notes_max,
+                    "ratio_actual": round(len(notes) / max(len(study_ctx), 1), 3),
+                    "study_notes_ratio": effective_study_notes_ratio(),
+                    "notes_path": notes_path.name,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         result = {
             "study_notes": notes,
@@ -376,18 +499,8 @@ def student_study(state: LearnLoopState) -> dict:
             registry = state.get("chapter_registry") or []
             idx = int(state.get("current_chapter_index", 0) or 0)
             ch = current_chapter(registry, idx)
-            if ch:
-                per_ch = max(
-                    200,
-                    settings.long_term_notes_max_chars // max(len(registry), 1),
-                )
-                result["long_term_notes"] = sync_chapter_long_term_notes(
-                    state.get("long_term_notes") or "",
-                    notes,
-                    ch.get("chapter_title", ""),
-                    per_chapter_max_chars=per_ch,
-                    total_max_chars=settings.long_term_notes_max_chars,
-                )
+            # Long-term memory is written only after chapter mastery (consolidate),
+            # not each study round — avoids duplicating short_term in context & state.
             archive = list(state.get("chapter_notes_archive") or [])
             journal = build_learning_journal(
                 archive,
@@ -611,6 +724,7 @@ def consolidate_chapter_notes(state: LearnLoopState) -> dict:
     archive = list(state.get("chapter_notes_archive") or [])
     per_chapter_budget = max(200, settings.long_term_notes_max_chars // max(len(registry), 1))
     macro = state.get("macro_iter", 0)
+    lt_enabled = int(settings.long_term_notes_max_chars) > 0
 
     try:
         if short_notes.strip():
@@ -620,17 +734,20 @@ def consolidate_chapter_notes(state: LearnLoopState) -> dict:
                 short_notes,
                 macro_iter=macro,
             )
-            summary = _consolidate_notes_llm(
-                ch.get("chapter_title", ""),
-                short_notes,
-                per_chapter_budget,
-            )
-            long_term = upsert_chapter_long_term_block(
-                long_term,
-                ch.get("chapter_title", ""),
-                summary,
-                total_max_chars=settings.long_term_notes_max_chars,
-            )
+            if lt_enabled:
+                summary = _consolidate_notes_llm(
+                    ch.get("chapter_title", ""),
+                    short_notes,
+                    per_chapter_budget,
+                )
+                long_term = upsert_chapter_long_term_block(
+                    long_term,
+                    ch.get("chapter_title", ""),
+                    summary,
+                    total_max_chars=settings.long_term_notes_max_chars,
+                )
+            else:
+                summary = ""
         else:
             summary = ""
 

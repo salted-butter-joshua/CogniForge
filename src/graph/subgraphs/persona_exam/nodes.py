@@ -15,6 +15,7 @@ from src.tools.json_utils import extract_json, llm_retry
 from src.tools.learning_policy import (
     curriculum_page_range_label,
     diversity_validation_errors,
+    ensure_question_evidence,
     exam_difficulty_hint,
 )
 from src.tools.rag import retrieve_chunks, search_corpus, valid_evidence_refs
@@ -201,10 +202,9 @@ def fuse_questions(state: PersonaExamState) -> dict:
 
 
 def validate_questions(state: PersonaExamState) -> dict:
-    chunks = state.get("chunks_snapshot") or []
+    exam_chunks = state.get("chunks_snapshot") or []
+    evidence_pool = state.get("evidence_pool_snapshot") or exam_chunks
     allowed = set(state.get("allowed_evidence_ids") or [])
-    if allowed:
-        chunks = [c for c in chunks if c.get("id") in allowed] or chunks
     drafts = state.get("draft_questions") or []
     target = state.get("questions_target", 10)
     difficulty = state.get("difficulty_level_snapshot") or 0
@@ -225,15 +225,20 @@ def validate_questions(state: PersonaExamState) -> dict:
         if text in seen_questions:
             errors.append(f"第 {i + 1} 题与前面重复")
         seen_questions.add(text)
-        refs = q.get("evidence_refs") or []
-        if allowed and refs and not all(r in allowed for r in refs):
-            errors.append(f"第 {i + 1} 题 evidence 超出本轮学习范围")
-            continue
-        if not valid_evidence_refs(refs, chunks):
-            if chunks:
-                q["evidence_refs"] = [chunks[0].get("id", "")]
-            else:
-                errors.append(f"第 {i + 1} 题 evidence_refs 无效且无可用 chunk")
+        refs = list(q.get("evidence_refs") or [])
+        new_refs, overlap = ensure_question_evidence(
+            text,
+            refs,
+            evidence_pool,
+            allowed_ids=allowed or None,
+        )
+        q["evidence_refs"] = new_refs
+        if not valid_evidence_refs(new_refs, evidence_pool):
+            errors.append(f"第 {i + 1} 题 evidence_refs 无效且无可用 chunk")
+        elif overlap < 0.03:
+            errors.append(
+                f"第 {i + 1} 题 evidence 与题干语义匹配过低（overlap={overlap:.2f}）"
+            )
 
     passed = len(errors) == 0
     round_num = (state.get("validate_round") or 0) + 1

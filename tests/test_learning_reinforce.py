@@ -232,3 +232,46 @@ def test_reinforce_pool_cap_early_rounds():
     early = reinforce_pool_cap(20, macro_iter=0, chapter_attempts=1, ratio=0.5)
     late = reinforce_pool_cap(20, macro_iter=5, chapter_attempts=6, ratio=0.5)
     assert early >= late
+
+
+def test_compute_study_notes_budget():
+    from src.config import get_settings
+    from src.tools.learning_policy import compute_study_notes_budget
+
+    import os
+
+    os.environ["STUDY_NOTES_TARGET_RATIO"] = "1.75"
+    os.environ["SHORT_TERM_NOTES_MAX_CHARS"] = "6000"
+    get_settings.cache_clear()
+    notes_max, target = compute_study_notes_budget(8000)
+    assert target == 14000
+    assert notes_max >= 14000
+    notes_max2, target2 = compute_study_notes_budget(8000, prior_chars=15000)
+    assert target2 >= 15000
+    assert notes_max2 >= 15000
+    get_settings.cache_clear()
+
+
+def test_guard_incremental_notes_keeps_prior_on_shrink():
+    from src.tools.learning_policy import guard_incremental_notes
+
+    prior = "## 知识框架\n" + ("内容段落。" * 200)
+    shrunk = "## 知识框架\n简短摘要"
+    out = guard_incremental_notes(prior, shrunk, notes_max_chars=50000)
+    assert prior in out or out.startswith("## 知识框架")
+    assert len(out) >= len(prior) * 0.9
+
+
+def test_effective_study_notes_ratio_clamps():
+    from src.config import get_settings
+    from src.tools.learning_policy import effective_study_notes_ratio
+
+    import os
+
+    os.environ["STUDY_NOTES_TARGET_RATIO"] = "3.0"
+    get_settings.cache_clear()
+    assert effective_study_notes_ratio() == 2.0
+    os.environ["STUDY_NOTES_TARGET_RATIO"] = "1.2"
+    get_settings.cache_clear()
+    assert effective_study_notes_ratio() == 1.5
+    get_settings.cache_clear()

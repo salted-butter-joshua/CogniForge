@@ -75,6 +75,7 @@ def build_persona_exam_input(
         )
         range_hint = chapter_label(registry, ch_index)
         chapter_scope_label = range_hint
+        evidence_pool = list(unlocked)
         allowed_ids: set[str] = set()
         if ch:
             allowed_ids = study_aligned_chunk_ids(
@@ -91,6 +92,7 @@ def build_persona_exam_input(
         unlocked = curriculum_chunks(
             all_chunks, curriculum_level, settings.curriculum_pages_per_round
         )
+        evidence_pool = list(unlocked)
         range_hint = ""
         chapter_scope_label = ""
         allowed_ids = set()
@@ -119,6 +121,7 @@ def build_persona_exam_input(
         persona_prompt_hint=persona.get("prompt_hint", ""),
         material_snapshot=parent.get("study_material") or "",
         chunks_snapshot=unlocked,
+        evidence_pool_snapshot=evidence_pool,
         weak_topics_snapshot=persona_weak,
         focus_hint=focus_hint,
         chapter_scope_label=chapter_scope_label,
@@ -374,10 +377,15 @@ def _answer_questions_batch(
     if closed_book:
         prompt = f"""你是学生 A，正在进行闭卷考试。
 你只能依靠「长期记忆（内化知识）」与极少量「工作记忆参考层（术语/易错/自测摘录）」作答。
-完整手抄笔记、教材原文不在考场上可用；禁止编造未在记忆材料中出现的细节。
-记不清的内容请明确说「不确定」或「不知道」。
-回答用自然语言，不要贴完整 YAML/大段代码。
-英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
+完整手抄笔记、教材原文不在考场上可用。
+
+作答精度（与「发散」平衡）：
+- 优先准确：只写记忆材料中有的机制；**不要把机制条件写反**（例：资源冲突通常是多个管理器改「同一字段」，不是「不同字段」）
+- 对「会自动检测/提示」类问题：写清默认后果（如拒绝 apply、Conflict 错误），不确定则说「不确定」，不要编造「仅提示警告」
+- 不要为了显得完整而补充 plausible 但无依据的因果链
+- 记不清的内容请明确说「不确定」或「不知道」
+- 回答用自然语言，简洁优先；不要贴完整 YAML/大段代码
+- 英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
 
 你的可用记忆（已按人脑分层筛选，非完整笔记）：
 {notes_excerpt or "（尚无可用记忆）"}

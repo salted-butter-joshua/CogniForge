@@ -114,12 +114,18 @@ class Settings(BaseSettings):
     short_term_notes_max_chars: int = Field(
         default=6000, alias="SHORT_TERM_NOTES_MAX_CHARS"
     )
+    study_notes_target_ratio: float = Field(
+        default=1.75, alias="STUDY_NOTES_TARGET_RATIO"
+    )
+    study_notes_hard_max_chars: int = Field(
+        default=50000, alias="STUDY_NOTES_HARD_MAX_CHARS"
+    )
     chapter_review_ratio: float = Field(default=0.1, alias="CHAPTER_REVIEW_RATIO")
     reinforce_pool_ratio: float = Field(default=0.5, alias="REINFORCE_POOL_RATIO")
     # Closed-book exam memory budget split (must sum <= 1.0)
-    exam_long_term_ratio: float = Field(default=0.50, alias="EXAM_LONG_TERM_RATIO")
+    exam_long_term_ratio: float = Field(default=0.05, alias="EXAM_LONG_TERM_RATIO")
     exam_working_layer_ratio: float = Field(
-        default=0.45, alias="EXAM_WORKING_LAYER_RATIO"
+        default=0.90, alias="EXAM_WORKING_LAYER_RATIO"
     )
 
 

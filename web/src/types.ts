@@ -49,6 +49,7 @@ export interface RoundRecord {
   macro_iter: number;
   accuracy: number;
   plain_accuracy: number;
+  batch_accuracy?: number;
   chapter_accuracy?: number;
   difficulty_level: number;
   curriculum_level: number;
@@ -60,6 +61,34 @@ export interface RoundRecord {
   topic_counts: Record<string, number>;
   persona_counts: Record<string, number>;
   chapter_progress?: ChapterProgress[];
+  chapter_relevant_count?: number;
+  chapter_total_scored?: number;
+  chapter_evidence_fallback?: boolean;
+  judge_anomaly?: boolean;
+  judge_anomaly_reason?: string;
+  empty_judge_reason_count?: number;
+  avg_judge_score?: number;
+  reinforce_correct?: number;
+  reinforce_wrong?: number;
+  reinforce_pool_size?: number;
+  long_term_notes_chars?: number;
+  short_term_notes_chars?: number;
+  token_round_total?: number;
+  token_round_input?: number;
+  token_round_output?: number;
+  token_cumulative_total?: number;
+  token_cumulative_input?: number;
+  token_cumulative_output?: number;
+  token_calls_round?: number;
+  tokens_by_step_round?: Record<string, number>;
+  settings_snapshot?: Record<string, unknown>;
+  wrong_samples?: Array<{
+    question: string;
+    answer: string;
+    judge_reason: string;
+    judge_score?: number;
+    topic_tag?: string;
+  }>;
 }
 
 export interface ChapterProgress {
@@ -144,4 +173,4 @@ export interface RunEvent {
   phase?: string;
 }
 
-export type TabId = "launch" | "logs" | "curve" | "compare";
+export type TabId = "launch" | "logs" | "tokens" | "curve" | "compare";

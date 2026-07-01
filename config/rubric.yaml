@@ -11,7 +11,7 @@ rubric:
       description: 表达清楚、结构合理
     - name: boundary_awareness
       weight: 0.15
-      description: 证据不足时必须承认不知道；与 evidence 中心意思明显矛盾才从严扣分
+      description: 机制边界须准确（条件/对象/默认后果）；证据不足时承认不知道； plausible 但错误的机制扩展从严
   correct_threshold: 0.80
   target_accuracy: 0.95
   scoring_rules:
@@ -23,3 +23,6 @@ rubric:
     - 编造与 evidence 中心意思明显矛盾的细节才从严扣分
     - 英文术语大小写不敏感（etcd/Etcd/ETCD 等价）；中英同义表述与 evidence 中心一致即算对
     - 同一考点（topic）只要中心意思正确，不因表述方式与 evidence 字面不同而判错
+    - 机制/因果题须核对：触发条件、作用对象（如「同一字段」vs「不同字段」）、默认行为（拒绝/报错 vs 仅提示）是否与 evidence 一致
+    - 「看似合理」但 evidence 未支持或与 evidence 机制矛盾的扩展，应判错并在 reason 中逐条指出不严谨之处（完整写出，勿省略）
+    - reason 字段须完整说明扣分点，便于学生改笔记；不要只写「不准确」

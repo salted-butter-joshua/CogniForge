@@ -300,7 +300,7 @@ Artifacts are written to `outputs/{task_id}/` (gitignored):
 | File | Description |
 |------|-------------|
 | `study_material*.md` | Generated / refined handbook |
-| `study_notes_iter_N.md` | Student notes per round |
+| `study_notes.md` / `study_notes_{chapter_id}.md` | Student notes (in-place update per chapter) |
 | `qa_scored_iter_N.json` | Scored Q&A |
 | `judge_report_iter_N.md` | Judge report |
 | `observer_report_iter_N.md` | Observer analysis (archival) |

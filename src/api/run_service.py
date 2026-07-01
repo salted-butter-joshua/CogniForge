@@ -30,6 +30,7 @@ from src.main import build_initial_state
 from src.models.router import llm_runtime_info, validate_api_keys
 from src.tools.token_tracker import tracker as token_tracker
 from src.tools.learning_policy import mastery_progress_summary
+from src.tools.run_trace import write_run_config
 
 logger = get_loop_logger()
 
@@ -52,6 +53,21 @@ def load_summary(run_id: str) -> RunSummary | None:
     return RunSummary.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def mark_run_cancelling(run_id: str, *, message: str = "用户通过控制台停止") -> RunSummary | None:
+    """Mark a run as stopping so the UI unlocks before the graph thread exits."""
+    summary = load_summary(run_id)
+    if not summary or summary.status != "running":
+        return summary
+    updated = summary.model_copy(
+        update={
+            "status": "cancelling",
+            "error_message": message,
+        }
+    )
+    _save_summary(updated)
+    return updated
+
+
 def reconcile_stale_runs() -> int:
     """Mark runs left in 'running' (process died mid-run) as interrupted.
 
@@ -61,7 +77,7 @@ def reconcile_stale_runs() -> int:
     """
     count = 0
     for summary in list_summaries():
-        if summary.status == "running":
+        if summary.status in ("running", "cancelling"):
             summary = summary.model_copy(
                 update={
                     "status": "interrupted",
@@ -97,6 +113,7 @@ def _apply_env_overrides(params: RunParams) -> None:
         "CLOSED_BOOK_EXAM": "1" if params.closed_book_exam else "0",
         "STUDENT_NOTES_MAX_CHARS": str(params.student_notes_max_chars),
         "STUDENT_NOTES_STUDY_MAX_CHARS": str(params.student_notes_study_max_chars),
+        "STUDENT_MATERIAL_STUDY_MAX_CHARS": str(params.student_material_study_max_chars),
         "CURRICULUM_PAGES_PER_ROUND": str(params.curriculum_pages_per_round),
         "JUDGE_EVIDENCE_ONLY": "1" if params.judge_evidence_only else "0",
         "EVIDENCE_CAP_SCORE": str(params.evidence_cap_score),
@@ -108,6 +125,8 @@ def _apply_env_overrides(params: RunParams) -> None:
         ),
         "CHAPTER_MASTERY_ACCURACY": str(params.chapter_mastery_accuracy),
         "SHORT_TERM_NOTES_MAX_CHARS": str(params.short_term_notes_max_chars),
+        "STUDY_NOTES_TARGET_RATIO": str(params.study_notes_target_ratio),
+        "STUDY_NOTES_HARD_MAX_CHARS": str(params.study_notes_hard_max_chars),
         "LONG_TERM_NOTES_MAX_CHARS": str(params.long_term_notes_max_chars),
         "CHAPTER_REVIEW_RATIO": str(params.chapter_review_ratio),
         "EXAM_LONG_TERM_RATIO": str(params.exam_long_term_ratio),
@@ -169,6 +188,13 @@ def execute_run(run_id: str, params: RunParams, bus: RunEventBus, label: str = "
     task_id = params.task_id or f"web_{uuid.uuid4().hex[:8]}"
     thread_id = params.thread_id or task_id
     out_dir = ensure_output_dir(task_id)
+    write_run_config(
+        out_dir,
+        run_id=run_id,
+        params=params.model_dump(),
+        urls=params.urls,
+        goal=params.goal,
+    )
     created_at = time.time()
 
     summary = RunSummary(

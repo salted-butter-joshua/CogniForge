@@ -6,6 +6,7 @@ const STATUS_LABEL: Record<string, string> = {
   success: "成功",
   failed: "失败",
   cancelled: "已取消",
+  cancelling: "停止中",
   stagnated: "停滞",
   max_iter_reached: "达上限",
   interrupted: "已中断",

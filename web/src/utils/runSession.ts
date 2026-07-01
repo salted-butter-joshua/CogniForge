@@ -42,5 +42,9 @@ export function loadActiveTab(): string | null {
 }
 
 export function isTerminalStatus(status: string): boolean {
-  return !["running"].includes(status);
+  return !["running", "cancelling"].includes(status);
+}
+
+export function isActiveRunStatus(status: string): boolean {
+  return status === "running";
 }
