@@ -33,7 +33,9 @@ from src.tools.learning_policy import (
     build_study_context,
     cap_study_notes,
     chapter_label,
+    chapter_material_char_basis,
     chunks_for_chapter,
+    compute_study_context_budget,
     compute_study_notes_budget,
     current_chapter,
     curriculum_chunks,
@@ -405,6 +407,17 @@ def student_study(state: LearnLoopState) -> dict:
         idx = int(state.get("current_chapter_index", 0) or 0)
         scope_label = chapter_label(registry, idx)
         prior = state.get("short_term_notes") or state.get("study_notes") or ""
+        ch = current_chapter(registry, idx)
+        material_basis = chapter_material_char_basis(
+            state.get("study_material") or "",
+            raw_chunks,
+            (ch or {}).get("chapter_id", ""),
+        )
+        study_window = compute_study_context_budget(
+            material_basis,
+            len(prior),
+            floor=settings.student_material_study_max_chars,
+        )
         study_ctx = build_chapter_study_context(
             raw_chunks=raw_chunks,
             chapter_registry=registry,
@@ -412,10 +425,10 @@ def student_study(state: LearnLoopState) -> dict:
             study_material=state.get("study_material") or "",
             long_term_notes=state.get("long_term_notes") or "",
             short_term_notes=prior,
-            max_chars=settings.student_material_study_max_chars,
+            max_chars=study_window,
         )
         notes_max, notes_target = compute_study_notes_budget(
-            len(study_ctx),
+            material_basis,
             prior_chars=len(prior),
         )
     else:
@@ -424,15 +437,29 @@ def student_study(state: LearnLoopState) -> dict:
             curriculum_level, settings.curriculum_pages_per_round
         )
         prior = state.get("study_notes") or ""
+        unlocked = curriculum_chunks(
+            raw_chunks, curriculum_level, settings.curriculum_pages_per_round
+        )
+        material_basis = max(
+            len((state.get("study_material") or "").strip()),
+            len(material_context(unlocked, max_chars=500_000).strip()),
+            500,
+        )
+        study_window = compute_study_context_budget(
+            material_basis,
+            len(prior),
+            floor=settings.student_material_study_max_chars,
+        )
         study_ctx = build_study_context(
             raw_chunks=raw_chunks,
             study_material=state.get("study_material") or "",
             curriculum_level=curriculum_level,
             pages_per_round=settings.curriculum_pages_per_round,
-            max_chars=settings.student_material_study_max_chars,
+            max_chars=study_window,
+            prior_notes=prior,
         )
         notes_max, notes_target = compute_study_notes_budget(
-            len(study_ctx),
+            material_basis,
             prior_chars=len(prior),
         )
 
@@ -476,6 +503,8 @@ def student_study(state: LearnLoopState) -> dict:
                     "study_mode": study_mode,
                     "chapter_id": chapter_id,
                     "prior_notes_chars": len(prior),
+                    "material_basis_chars": material_basis,
+                    "study_window_chars": study_window,
                     "material_chars": len(study_ctx),
                     "notes_chars": len(notes),
                     "notes_target_chars": notes_target,

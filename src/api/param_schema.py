@@ -22,10 +22,13 @@ DEV_PRESET_VALUES: dict = {
     "chapter_review_ratio": 0.1,
     "exam_long_term_ratio": 0.05,
     "exam_working_layer_ratio": 0.90,
+    "exam_memory_mode": "full_notes",
     "reinforce_pool_ratio": 0.5,
     "student_notes_max_chars": 6000,
     "evidence_cap_score": 0.88,
     "judge_semantic_lenient": True,
+    "judge_scoring_mode": "exam_memory",
+    "judge_evidence_only": False,
     "judge_temperature": 0.2,
     "student_exam_temperature": 0.25,
     "crawl_max_pages": 0,
@@ -53,10 +56,13 @@ PROD_PRESET_VALUES: dict = {
     "chapter_review_ratio": 0.1,
     "exam_long_term_ratio": 0.05,
     "exam_working_layer_ratio": 0.90,
+    "exam_memory_mode": "full_notes",
     "reinforce_pool_ratio": 0.5,
     "student_notes_max_chars": 6000,
     "evidence_cap_score": 0.88,
     "judge_semantic_lenient": True,
+    "judge_scoring_mode": "exam_memory",
+    "judge_evidence_only": False,
     "judge_temperature": 0.2,
     "student_exam_temperature": 0.25,
     "crawl_max_pages": 0,
@@ -219,8 +225,11 @@ def get_param_schema() -> ParamSchemaResponse:
         ),
         ParamFieldSchema(
             key="student_material_study_max_chars",
-            label="学习资料上下文上限",
-            description="学习阶段每次喂给学生的本章/窗口资料最大字数（不含长期记忆与旧笔记）",
+            label="学习资料上下文下限",
+            description=(
+                "学习阶段上下文的最小字数；系统会按「本章完整资料 + 已有笔记」自动扩展，"
+                "通常大于此值。仅当自动扩展仍不足时再手动调高"
+            ),
             type="int",
             default=d.get("student_material_study_max_chars", 6000),
             min=1000,
@@ -283,10 +292,11 @@ def get_param_schema() -> ParamSchemaResponse:
         ),
         ParamFieldSchema(
             key="student_notes_max_chars",
-            label="闭卷记忆总预算",
+            label="考试记忆总预算",
             description=(
-                "闭卷时可用的记忆总字数（长期内化 + 工作参考层），不等于完整工作笔记长度。"
-                "与上方「工作笔记硬上限」是不同参数，均可手动调整"
+                "作答时可用的记忆总字数。"
+                "「完整笔记」模式会自动至少取「工作笔记硬上限」；"
+                "「A-MEM 长期记忆」模式会合并长期记忆 + 当前章笔记"
             ),
             type="int",
             default=d["student_notes_max_chars"],
@@ -295,12 +305,28 @@ def get_param_schema() -> ParamSchemaResponse:
             group="记忆与闭卷",
         ),
         ParamFieldSchema(
+            key="exam_memory_mode",
+            label="考试记忆模式",
+            description=(
+                "full_notes=完整工作笔记（含已掌握章节归档）；"
+                "long_term=A-MEM 长期记忆 + 当前章完整笔记（适合多章/全书）；"
+                "layered=旧版参考层 + 长期记忆占比"
+            ),
+            type="select",
+            default=d.get("exam_memory_mode", "full_notes"),
+            options=[
+                {"value": "full_notes", "label": "完整工作笔记"},
+                {"value": "long_term", "label": "A-MEM 长期记忆"},
+                {"value": "layered", "label": "参考层（旧版）"},
+            ],
+            group="记忆与闭卷",
+        ),
+        ParamFieldSchema(
             key="exam_long_term_ratio",
             label="闭卷·长期记忆占比",
             description=(
-                "闭卷总预算中分配给「已掌握章节内化摘要」的比例。"
-                "本章学习中当前章内容在闭卷时走「参考层」（工作笔记摘录），"
-                "长期记忆通常仅含已掌握章节；可设为 0"
+                "仅「参考层（layered）」模式生效："
+                "闭卷总预算中分配给已掌握章节内化摘要的比例"
             ),
             type="float",
             default=d.get("exam_long_term_ratio", 0.05),
@@ -315,9 +341,8 @@ def get_param_schema() -> ParamSchemaResponse:
             key="exam_working_layer_ratio",
             label="闭卷·参考层占比",
             description=(
-                "闭卷总预算中分配给「本章工作笔记摘录（术语/易错/自测）」的比例。"
-                "同章多轮学习时闭卷主要依赖此项，建议 0.90–0.95；"
-                "与长期记忆之和超过 95% 时会被自动调低"
+                "仅「参考层（layered）」模式生效："
+                "闭卷总预算中分配给工作笔记摘录（术语/易错/自测）的比例"
             ),
             type="float",
             default=d.get("exam_working_layer_ratio", 0.90),
@@ -379,11 +404,20 @@ def get_param_schema() -> ParamSchemaResponse:
             visible_when_equals=False,
         ),
         ParamFieldSchema(
-            key="judge_evidence_only",
-            label="Evidence 评分",
-            description="Judge 仅依据 evidence 原文评分",
-            type="bool",
-            default=d["judge_evidence_only"],
+            key="judge_scoring_mode",
+            label="Judge 判分模式",
+            description=(
+                "exam_memory=与学生闭卷记忆一致，允许合理扩展；"
+                "contradiction_only=仅因明显矛盾扣分；"
+                "evidence_only=旧版，仅看 evidence chunk"
+            ),
+            type="select",
+            default=d.get("judge_scoring_mode", "exam_memory"),
+            options=[
+                {"value": "exam_memory", "label": "闭卷记忆 + evidence（推荐）"},
+                {"value": "contradiction_only", "label": "矛盾检测（宽松）"},
+                {"value": "evidence_only", "label": "仅 evidence（严格）"},
+            ],
             group="评分",
         ),
         ParamFieldSchema(

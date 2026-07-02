@@ -149,27 +149,44 @@ def build_study_context(
     curriculum_level: int,
     pages_per_round: int,
     max_chars: int,
+    prior_notes: str = "",
 ) -> str:
     """Align student-readable content with the cumulative unlocked curriculum window."""
     from src.tools.web_fetch import material_context
 
     unlocked = curriculum_chunks(raw_chunks, curriculum_level, pages_per_round)
     range_label = curriculum_page_range_label(curriculum_level, pages_per_round)
-    chunk_budget = max(max_chars * 2 // 3, 1000)
-    chunk_text = material_context(unlocked, max_chars=chunk_budget)
-    material_budget = max(max_chars - len(chunk_text) - 200, 500)
-    material_excerpt = (study_material or "").strip()[:material_budget]
+    material_full = (study_material or "").strip()
+    chunk_text = material_context(unlocked, max_chars=max(max_chars // 2, 2000))
 
     parts: list[str] = [
         f"【课程范围】{range_label}。请只学习此范围内内容，不要超前。",
     ]
-    if material_excerpt:
-        parts.append(f"## 已整理学习资料（与上述范围对应）\n{material_excerpt}")
+    if prior_notes.strip():
+        parts.append(
+            "## 当前工作笔记（请在此基础上增量修订）\n"
+            + sanitize_prior_study_notes(prior_notes)
+        )
+    if material_full:
+        parts.append(f"## 已整理学习资料（与上述范围对应）\n{material_full}")
     parts.append(f"## 本阶段已解锁原文\n{chunk_text}")
+
     text = "\n\n".join(parts)
-    if len(text) > max_chars:
-        return text[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
-    return text
+    if len(text) <= max_chars:
+        return text
+
+    # Prefer keeping full material + prior; trim chunk tail first.
+    if material_full and prior_notes.strip():
+        core = "\n\n".join(parts[:3])
+        room = max(max_chars - len(core) - 40, 500)
+        trimmed_chunks = chunk_text[:room] + ("…" if len(chunk_text) > room else "")
+        return f"{core}\n\n## 本阶段已解锁原文\n{trimmed_chunks}"
+    if material_full:
+        core = "\n\n".join(parts[:2]) if prior_notes.strip() else "\n\n".join(parts[:2])
+        room = max(max_chars - len(core) - 40, 500)
+        trimmed_chunks = chunk_text[:room] + ("…" if len(chunk_text) > room else "")
+        return f"{core}\n\n## 本阶段已解锁原文\n{trimmed_chunks}"
+    return text[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
 
 
 def chunks_by_ids(chunks: list[dict], ids: list[str]) -> list[dict]:
@@ -214,6 +231,124 @@ def format_batch_evidence_context(
                 seen.add(ref)
                 ids.append(ref)
     return format_evidence_context(chunks, ids, max_chars=max_chars)
+
+
+JUDGE_SCORING_MODES: tuple[str, ...] = (
+    "evidence_only",
+    "exam_memory",
+    "contradiction_only",
+)
+
+
+def normalize_judge_scoring_mode(mode: str | None) -> str:
+    value = (mode or "").strip().lower()
+    return value if value in JUDGE_SCORING_MODES else ""
+
+
+def effective_judge_scoring_mode(settings=None) -> str:
+    """Resolve judge mode from JUDGE_SCORING_MODE or legacy JUDGE_EVIDENCE_ONLY."""
+    settings = settings or get_settings()
+    mode = normalize_judge_scoring_mode(getattr(settings, "judge_scoring_mode", None))
+    if mode:
+        return mode
+    return "evidence_only" if settings.judge_evidence_only else "exam_memory"
+
+
+def build_judge_scoring_context(
+    *,
+    chunks: list[dict],
+    qa_batch: list[dict],
+    mode: str,
+    exam_memory_text: str = "",
+    study_material: str = "",
+    evidence_max_chars: int = 12000,
+    material_max_chars: int = 5000,
+) -> str:
+    """Assemble judge-visible reference bundle for the active scoring mode."""
+    mode = normalize_judge_scoring_mode(mode) or "exam_memory"
+    evidence_ctx = format_batch_evidence_context(
+        chunks, qa_batch, max_chars=evidence_max_chars
+    )
+
+    if mode == "evidence_only":
+        return f"""判分依据（evidence-only）：
+你只能看到下列 evidence 原文，看不到学生笔记与完整教材。
+
+{evidence_ctx}"""
+
+    memory = (exam_memory_text or "").strip() or "（本轮闭卷无可用记忆）"
+    material_excerpt = (study_material or "").strip()[:material_max_chars]
+
+    if mode == "contradiction_only":
+        return f"""判分依据（contradiction-only）：
+以「是否答对 / 是否与参考资料矛盾」为主，不因 evidence 未覆盖的细节单独扣分。
+
+【Evidence 锚点 — 用于发现明显矛盾】
+{evidence_ctx}
+
+【学生闭卷可用记忆 — 学生答题时已看到，合理扩展应接受】
+{memory}"""
+
+    parts = [
+        "判分依据（exam_memory — 与学生闭卷条件一致）：",
+        "学生答题时已看到「闭卷记忆」；evidence 用于核对出题引用与发现矛盾，"
+        "不是答案必须逐字出现的唯一白名单。",
+        "",
+        "【1. 学生闭卷可用记忆】",
+        memory,
+        "",
+        "【2. Evidence 锚点（本题 evidence_refs 原文）】",
+        evidence_ctx,
+    ]
+    if material_excerpt:
+        parts.extend(
+            [
+                "",
+                "【3. 本章学习资料摘要】",
+                material_excerpt,
+            ]
+        )
+    parts.extend(
+        [
+            "",
+            "判分要点：",
+            "- 答案可包含笔记/资料/合理先验中的额外正确细节",
+            "- 不得因「evidence 未提及该细节」单独扣分，除非与 evidence/资料/记忆明显矛盾",
+            "- 仅当核心概念错误、机制写反、或与上述材料明显矛盾时才判错",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def judge_system_message_for_mode(mode: str) -> str:
+    mode = normalize_judge_scoring_mode(mode) or "exam_memory"
+    if mode == "evidence_only":
+        return (
+            "evidence-only 评分：主要依据 evidence 原文。"
+            "中心意思一致即可判对，但对机制/边界题须与 evidence 一致。"
+            "reason 须完整写出扣分依据。"
+        )
+    if mode == "contradiction_only":
+        return (
+            "contradiction-only 评分：检查答案是否与 evidence/闭卷记忆明显矛盾。"
+            "额外正确细节、evidence 未覆盖的标准知识不应扣分。"
+            "仅矛盾、核心错误、机制写反才判错。"
+        )
+    return (
+        "exam_memory 评分：学生闭卷时已看到完整工作记忆/长期记忆，"
+        "答案可以比 evidence chunk 更细、更全，这是正常学习结果。"
+        "以「题目是否答对」为主，不因 evidence 未提及而惩罚合理扩展；"
+        "仅当与 evidence/资料/记忆明显矛盾或机制写反时才判错。"
+        "reason 须完整写出扣分依据。"
+    )
+
+
+def should_apply_evidence_cap(mode: str, *, semantic_lenient: bool) -> bool:
+    """Lexical evidence_cap only applies in strict evidence-only mode."""
+    resolved = normalize_judge_scoring_mode(mode) or "exam_memory"
+    if resolved != "evidence_only":
+        return False
+    return not semantic_lenient
 
 
 def exam_difficulty_hint(difficulty_level: int) -> str:
@@ -277,23 +412,164 @@ def _answer_terms(text: str) -> set[str]:
     return {t for t in re.findall(r"[\w\u4e00-\u9fff]{3,}", text.lower()) if len(t) > 2}
 
 
+_CJK_PARTICLE_RE = re.compile(
+    r"[的了吗呢吧啊呀是在与及和或把被给将对向从到用什么如何为什么哪些哪个通过以及、，；;|/\s]+"
+)
+
+
+def _match_terms(text: str) -> set[str]:
+    """Tokenize for question↔chunk alignment (English + segmented Chinese)."""
+    terms: set[str] = set()
+    raw = (text or "").lower()
+    for t in re.findall(r"[a-z0-9_./-]+", raw):
+        clean = t.strip("./")
+        if len(clean) >= 2:
+            terms.add(clean)
+    for segment in _CJK_PARTICLE_RE.split(raw):
+        segment = segment.strip("？?。.")
+        if not segment:
+            continue
+        if 2 <= len(segment) <= 6:
+            terms.add(segment)
+        for i in range(len(segment) - 1):
+            gram = segment[i : i + 2]
+            if re.fullmatch(r"[\u4e00-\u9fff]{2}", gram):
+                terms.add(gram)
+    return terms
+
+
 def _question_terms(text: str) -> set[str]:
-    return _answer_terms(text)
+    return _match_terms(text)
 
 
-def question_chunk_overlap(question: str, chunk: dict) -> float:
-    """Lexical overlap between question stem and chunk text (0–1)."""
-    q_terms = _question_terms(question)
+_QUESTION_GENERIC_TERMS: frozenset[str] = frozenset(
+    {
+        "kubernetes",
+        "k8s",
+        "什么",
+        "如何",
+        "为什么",
+        "怎样",
+        "是否",
+        "能否",
+        "设计",
+        "作用",
+        "机制",
+        "通过",
+        "格式",
+        "这种",
+        "以下",
+        "哪些",
+        "哪个",
+        "区别",
+        "关系",
+        "场景",
+        "问题",
+        "组件",
+        "集群",
+        "资源",
+        "对象",
+        "系统",
+        "默认",
+        "常见",
+        "主要",
+        "一般",
+        "通常",
+        "可以",
+        "需要",
+        "应该",
+        "以及",
+        "还是",
+        "或者",
+        "其中",
+        "包括",
+        "涉及",
+        "相关",
+        "内容",
+        "特点",
+        "功能",
+        "方式",
+        "方法",
+        "过程",
+        "步骤",
+        "原因",
+        "结果",
+        "影响",
+        "区别",
+        "对比",
+        "举例",
+        "说明",
+        "解释",
+        "描述",
+        "理解",
+        "掌握",
+        "学习",
+        "考试",
+        "题目",
+        "答案",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "what",
+        "when",
+        "where",
+        "which",
+        "have",
+        "has",
+        "are",
+        "was",
+        "were",
+    }
+)
+
+
+def _domain_terms(*texts: str) -> set[str]:
+    terms: set[str] = set()
+    for text in texts:
+        terms |= _match_terms(text)
+    return {t for t in terms if t not in _QUESTION_GENERIC_TERMS}
+
+
+def _chunk_terms(chunk: dict) -> set[str]:
+    text = _chunk_text(chunk).lower()
+    terms = _match_terms(text)
+    if "/metrics" in text or "metrics" in text:
+        terms.update({"metrics", "prometheus", "指标", "监控", "端点"})
+    if "prometheus" in text:
+        terms.add("prometheus")
+    return terms
+
+
+def _chunk_text(chunk: dict) -> str:
+    return " ".join(str(chunk.get(k) or "") for k in ("title", "heading", "content"))
+
+
+def question_chunk_overlap(
+    question: str,
+    chunk: dict,
+    *,
+    topic_tag: str = "",
+    weak_topic: str = "",
+) -> float:
+    """Lexical overlap between question stem/topic and chunk text (0–1)."""
+    q_terms = _domain_terms(question, topic_tag, weak_topic)
     if not q_terms:
         return 0.0
-    text = " ".join(
-        str(chunk.get(k) or "")
-        for k in ("title", "heading", "content")
-    )
-    c_terms = _answer_terms(text)
+    c_terms = _chunk_terms(chunk)
     if not c_terms:
         return 0.0
-    return len(q_terms & c_terms) / len(q_terms)
+    stem_hits = len(_domain_terms(question) & c_terms)
+    topic_hits = len(_domain_terms(topic_tag, weak_topic) & c_terms)
+    if topic_hits > 0:
+        topic_terms = _domain_terms(topic_tag, weak_topic)
+        topic_ratio = topic_hits / max(len(topic_terms), 1)
+        stem_ratio = stem_hits / max(len(_domain_terms(question)), 1)
+        return max(topic_ratio, stem_ratio * 0.85)
+    return stem_hits / max(len(_domain_terms(question)), 1)
 
 
 def pick_evidence_refs_for_question(
@@ -302,6 +578,8 @@ def pick_evidence_refs_for_question(
     *,
     allowed_ids: set[str] | None = None,
     max_refs: int = 2,
+    topic_tag: str = "",
+    weak_topic: str = "",
 ) -> list[str]:
     """Pick chunk IDs whose text best matches the question stem."""
     pool = [
@@ -314,7 +592,18 @@ def pick_evidence_refs_for_question(
     if not pool:
         return []
     scored = sorted(
-        ((question_chunk_overlap(question, c), c) for c in pool),
+        (
+            (
+                question_chunk_overlap(
+                    question,
+                    c,
+                    topic_tag=topic_tag,
+                    weak_topic=weak_topic,
+                ),
+                c,
+            )
+            for c in pool
+        ),
         key=lambda x: x[0],
         reverse=True,
     )
@@ -330,8 +619,6 @@ def pick_evidence_refs_for_question(
         refs.append(cid)
         if len(refs) >= max_refs:
             break
-    if not refs and pool:
-        refs = [str(pool[0].get("id", ""))]
     return refs
 
 
@@ -342,7 +629,10 @@ def ensure_question_evidence(
     *,
     allowed_ids: set[str] | None = None,
     min_overlap: float = 0.05,
+    min_accept_overlap: float = 0.12,
     max_refs: int = 2,
+    topic_tag: str = "",
+    weak_topic: str = "",
 ) -> tuple[list[str], float]:
     """Validate or rebind evidence_refs so they semantically match the question."""
     pool = {str(c.get("id", "")): c for c in chunks if c.get("id")}
@@ -355,27 +645,40 @@ def ensure_question_evidence(
         if narrowed:
             search_pool = narrowed
 
+    def _overlap(chunk: dict) -> float:
+        return question_chunk_overlap(
+            question,
+            chunk,
+            topic_tag=topic_tag,
+            weak_topic=weak_topic,
+        )
+
     def _best_in(pool_chunks: list[dict]) -> tuple[list[str], float]:
         picked = pick_evidence_refs_for_question(
             question,
             pool_chunks,
             allowed_ids=allowed_ids,
             max_refs=max_refs,
+            topic_tag=topic_tag,
+            weak_topic=weak_topic,
         )
         score = max(
-            (question_chunk_overlap(question, pool[r]) for r in picked if r in pool),
+            (_overlap(pool[r]) for r in picked if r in pool),
             default=0.0,
         )
         return picked, score
 
     valid_refs = [r for r in refs if r in pool]
     if valid_refs:
-        cited_best = max(
-            question_chunk_overlap(question, pool[r]) for r in valid_refs
-        )
+        cited_best = max(_overlap(pool[r]) for r in valid_refs)
         best_refs, best_score = _best_in(search_pool)
-        if cited_best >= min_overlap and best_score <= cited_best * 1.15:
+        if (
+            cited_best >= min_accept_overlap
+            and best_score <= cited_best * 1.15
+        ):
             return valid_refs[:max_refs], cited_best
+        if best_score > cited_best * 1.25 and best_score >= min_overlap:
+            return best_refs, best_score
 
     new_refs, best = _best_in(search_pool)
     if best < min_overlap:
@@ -841,9 +1144,8 @@ def build_learning_journal(
     if goal:
         lines.extend([f"> **学习目标**：{goal}", ""])
     lines.append(
-        "> 说明：本文件为学习阶段的完整工作笔记归档；"
-        "闭卷考试时仅使用「长期记忆摘要」+「工作记忆参考层（术语/易错/自测）」，"
-        "不得查阅本文件全文。"
+        "> 说明：本文件为学习阶段的完整工作笔记归档。"
+        "考试时可按参数选择「完整工作笔记」或「A-MEM 长期记忆 + 当前章笔记」。"
     )
     lines.append("")
 
@@ -904,6 +1206,66 @@ def _truncate_sections(text: str, max_chars: int) -> str:
     return "\n\n".join(kept)
 
 
+EXAM_MEMORY_MODES: tuple[str, ...] = ("layered", "full_notes", "long_term")
+
+
+def normalize_exam_memory_mode(mode: str | None) -> str:
+    value = (mode or "full_notes").strip().lower()
+    return value if value in EXAM_MEMORY_MODES else "full_notes"
+
+
+def chapter_material_char_basis(
+    study_material: str,
+    raw_chunks: list[dict],
+    chapter_id: str,
+) -> int:
+    """Character basis for notes budget: full handbook + chapter source text."""
+    from src.tools.web_fetch import material_context
+
+    material_len = len((study_material or "").strip())
+    chunks = chunks_for_chapter(raw_chunks, chapter_id) if chapter_id else list(raw_chunks)
+    chunk_len = len(material_context(chunks, max_chars=500_000).strip()) if chunks else 0
+    if material_len and chunk_len:
+        return max(material_len, chunk_len) + max(material_len // 8, 200)
+    return max(material_len, chunk_len, 500)
+
+
+def compute_study_context_budget(
+    material_basis: int,
+    prior_chars: int,
+    *,
+    floor: int,
+) -> int:
+    """Expand study LLM context to cover full chapter material + prior notes."""
+    settings = get_settings()
+    needed = material_basis + prior_chars + 800
+    expanded = max(floor, settings.student_material_study_max_chars, needed)
+    cap = material_basis + max(prior_chars, settings.study_notes_hard_max_chars) + 2000
+    return min(expanded, cap)
+
+
+def assemble_exam_working_memory(
+    *,
+    short_term_notes: str,
+    chapter_notes_archive: list[dict] | None,
+    current_chapter_id: str = "",
+) -> str:
+    """Full working notes: archived mastered chapters + current chapter notes."""
+    parts: list[str] = []
+    for entry in chapter_notes_archive or []:
+        cid = (entry.get("chapter_id") or "").strip()
+        if cid and cid == current_chapter_id:
+            continue
+        title = entry.get("chapter_title") or cid or "已学章节"
+        body = (entry.get("full_notes") or "").strip()
+        if body:
+            parts.append(f"## {title}\n{body}")
+    current = (short_term_notes or "").strip()
+    if current:
+        parts.append(current)
+    return "\n\n".join(parts).strip()
+
+
 def select_exam_notes(
     *,
     notes: str = "",
@@ -911,13 +1273,75 @@ def select_exam_notes(
     long_term_notes: str = "",
     short_term_notes: str = "",
     chapter_title: str = "",
+    chapter_notes_archive: list[dict] | None = None,
+    current_chapter_id: str = "",
 ) -> str:
-    """Closed-book memory bundle: deep (long-term) + shallow (working layer only).
-
-    Full working notes and learning journal are NOT included — those are for
-    study/archive only, matching human memory: internalized vs cheat-sheet cues.
-    """
+    """Build exam-visible memory bundle according to ``exam_memory_mode``."""
     settings = get_settings()
+    mode = normalize_exam_memory_mode(getattr(settings, "exam_memory_mode", "full_notes"))
+    working = assemble_exam_working_memory(
+        short_term_notes=short_term_notes or notes,
+        chapter_notes_archive=chapter_notes_archive,
+        current_chapter_id=current_chapter_id,
+    )
+
+    if mode == "full_notes":
+        preamble = (
+            "【答题依据·完整工作笔记】\n"
+            "1. 下列内容为学习阶段整理的工作笔记（含已掌握章节归档 + 当前章）\n"
+            "2. 闭卷时仅可依据这些笔记作答，不得查阅原文\n"
+            "3. 笔记未覆盖或记不清的内容请明确说「不确定」"
+        )
+        body = working.strip()
+        if not body:
+            return (
+                "（尚无可用工作笔记：请先完成本章学习并整理笔记。）"
+            )
+        label = (
+            f"【完整工作笔记·{chapter_title}】"
+            if chapter_title
+            else "【完整工作笔记】"
+        )
+        chunk = _truncate_sections(f"{label}\n{body}", max(max_chars - len(preamble) - 4, 400))
+        text = f"{preamble}\n\n{chunk}".strip()
+        if len(text) > max_chars:
+            overflow = len(text) - max_chars
+            trimmed = chunk[: max(len(chunk) - overflow - 3, 120)] + "…"
+            text = f"{preamble}\n\n{trimmed}"
+        return text
+
+    if mode == "long_term":
+        preamble = (
+            "【答题依据·A-MEM 长期记忆 + 当前章工作笔记】\n"
+            "1. 「长期记忆」= 已掌握章节的内化摘要（跨章/全书答题主要依据）\n"
+            "2. 「当前章工作笔记」= 正在学习章节的完整笔记\n"
+            "3. 不得查阅教材原文；记不清请说「不确定」"
+        )
+        parts: list[str] = []
+        lt = (long_term_notes or "").strip()
+        if lt:
+            lt_budget = int(max_chars * 0.55) if working else int(max_chars * 0.88)
+            parts.append(f"【长期记忆·A-MEM】\n{_truncate_sections(lt, lt_budget)}")
+        if working:
+            remaining = max_chars - len(preamble) - sum(len(p) for p in parts) - 8
+            label = (
+                f"【当前章完整工作笔记·{chapter_title}】"
+                if chapter_title
+                else "【当前章完整工作笔记】"
+            )
+            parts.append(f"{label}\n{_truncate_sections(working, max(remaining, 400))}")
+        if not parts:
+            return (
+                "（尚无可用记忆：请继续学习并掌握章节，"
+                "长期记忆会在章节达标后写入。）"
+            )
+        body = "\n\n".join(parts).strip()
+        text = f"{preamble}\n\n{body}".strip()
+        if len(text) > max_chars:
+            text = text[: max_chars - 12] + "\n…（记忆截断）"
+        return text
+
+    # layered — legacy shallow reference layer + long-term ratio split
     # Body budget split; leave headroom for closed-book preamble (trimmed to max_chars).
     _sum_cap = 0.95
     lt_ratio = min(max(settings.exam_long_term_ratio, 0.0), 0.95)
@@ -977,8 +1401,15 @@ def select_exam_notes(
 
 
 def exam_notes_char_budget() -> int:
-    """Total closed-book memory budget (NOT equal to full study notes)."""
-    return get_settings().student_notes_max_chars
+    """Total exam-visible memory budget; expands for full-notes / A-MEM modes."""
+    settings = get_settings()
+    base = int(settings.student_notes_max_chars)
+    mode = normalize_exam_memory_mode(getattr(settings, "exam_memory_mode", "full_notes"))
+    if mode == "full_notes":
+        return max(base, int(settings.study_notes_hard_max_chars))
+    if mode == "long_term":
+        return max(base, int(settings.long_term_notes_max_chars) + 12_000)
+    return base
 
 
 STUDY_NOTES_RATIO_MIN = 1.5
@@ -1008,17 +1439,41 @@ def compute_study_notes_budget(
     base_floor = max(500, int(settings.short_term_notes_max_chars))
     target = int(material_chars * ratio) if material_chars > 0 else base_floor
     if prior_chars > 0:
-        target = max(target, prior_chars)
+        target = max(target, prior_chars, int(material_chars * ratio))
     effective_cap = max(hard_max, prior_chars) if prior_chars > 0 else hard_max
     notes_max = min(max(base_floor, target, prior_chars or 0), effective_cap)
+    if prior_chars > 0:
+        growth = int(max(prior_chars, material_chars) * min(ratio, 1.75))
+        notes_max = min(max(notes_max, growth), effective_cap)
     return notes_max, target
 
 
 def cap_study_notes(text: str, max_chars: int) -> str:
-    """Trim notes to max length using section-aware truncation."""
+    """Trim notes at hard cap — prefer dropping trailing sections over inline ellipsis."""
     text = sanitize_prior_study_notes(text or "")
     if len(text) <= max_chars:
         return text
+
+    sections = _split_markdown_sections(text)
+    if len(sections) > 1:
+        kept: list[str] = []
+        total = 0
+        for sec in sections:
+            add = len(sec) + (2 if kept else 0)
+            if total + add <= max_chars - 48:
+                kept.append(sec)
+                total += add
+            else:
+                break
+        if kept and len(kept) < len(sections):
+            omitted = len(sections) - len(kept)
+            kept.append(f"…（另有 {omitted} 节超出本轮笔记上限，下轮请续写补全）")
+            merged = "\n\n".join(kept).strip()
+            if len(merged) <= max_chars:
+                return merged
+        if kept:
+            return "\n\n".join(kept).strip()
+
     trimmed = _truncate_sections(text, max_chars)
     if len(trimmed) <= max_chars:
         return trimmed
@@ -1234,12 +1689,11 @@ def build_chapter_study_context(
     short_term_notes: str,
     max_chars: int,
 ) -> str:
-    """Sliding window for study: prior short-term notes + current chapter material.
+    """Sliding window for study: prior notes + full chapter material + source chunks.
 
-    Long-term memory is NOT injected here — it is only written after chapter
-    mastery and consumed at closed-book exam, not during study rounds.
+    Long-term memory is NOT injected during study rounds.
     """
-    _ = long_term_notes  # kept for API compatibility; intentionally unused in study
+    _ = long_term_notes
     ch = current_chapter(chapter_registry, current_chapter_index)
     if not ch:
         return build_study_context(
@@ -1248,34 +1702,41 @@ def build_chapter_study_context(
             curriculum_level=0,
             pages_per_round=max(1, len(chapter_registry)),
             max_chars=max_chars,
+            prior_notes=short_term_notes,
         )
 
-    current_chunks = chunks_for_chapter(raw_chunks, ch["chapter_id"])
-    chunk_budget = max(int(max_chars * 0.55), 1000)
     from src.tools.web_fetch import material_context
 
-    chunk_text = material_context(current_chunks, max_chars=chunk_budget)
-    material_budget = max(max_chars - len(chunk_text) - 400, 400)
-    material_excerpt = (study_material or "").strip()[:material_budget]
-
-    # Prior notes: up to ~35% of window (full notes live in state; LLM also gets prior in revise prompt)
-    st_budget = min(max(int(max_chars * 0.35), 800), 4000)
-    st = _truncate_sections(short_term_notes or "", st_budget)
+    current_chunks = chunks_for_chapter(raw_chunks, ch["chapter_id"])
+    material_full = (study_material or "").strip()
+    chunk_text = material_context(current_chunks, max_chars=max(max_chars // 3, 2000))
+    prior = sanitize_prior_study_notes(short_term_notes or "")
 
     parts = [
         f"【当前章节】{chapter_label(chapter_registry, current_chapter_index)}。"
         "请只学习本章内容，不要超前。",
     ]
-    if st:
-        parts.append(f"## 本章工作笔记（请在此基础上增量修订）\n{st}")
-    if material_excerpt:
-        parts.append(f"## 本章整理资料\n{material_excerpt}")
-    parts.append(f"## 本章原文\n{chunk_text}")
+    if prior:
+        parts.append(f"## 本章工作笔记（请在此基础上增量修订）\n{prior}")
+    if material_full:
+        parts.append(f"## 本章整理资料（完整）\n{material_full}")
+    if chunk_text.strip():
+        parts.append(f"## 本章原文\n{chunk_text}")
 
     text = "\n\n".join(parts)
-    if len(text) > max_chars:
-        return text[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
-    return text
+    if len(text) <= max_chars:
+        return text
+
+    # Keep full material + prior; trim chunk supplement first.
+    head_parts = parts[:3] if material_full else parts[:2]
+    head = "\n\n".join(head_parts)
+    room = max(max_chars - len(head) - 48, 400)
+    if chunk_text.strip() and room > 200:
+        trimmed = chunk_text[:room] + ("…" if len(chunk_text) > room else "")
+        return f"{head}\n\n## 本章原文\n{trimmed}"
+    if len(head) <= max_chars:
+        return head
+    return head[: max_chars - 20] + "\n\n…（已达学习上下文上限）"
 
 
 def chapter_exam_accuracy(

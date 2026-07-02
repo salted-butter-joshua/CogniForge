@@ -29,7 +29,11 @@ class RunParams(BaseModel):
     student_notes_study_max_chars: int = Field(8000, ge=1000, le=50000)
     student_material_study_max_chars: int = Field(6000, ge=1000, le=100000)
     curriculum_pages_per_round: int = Field(12, ge=1, le=200)
-    judge_evidence_only: bool = True
+    judge_evidence_only: bool = False
+    judge_scoring_mode: str = Field(
+        "exam_memory",
+        description="Judge mode: evidence_only | exam_memory | contradiction_only",
+    )
     evidence_cap_score: float = Field(0.88, ge=0.5, le=1.0)
     judge_semantic_lenient: bool = True
     judge_temperature: float = Field(0.2, ge=0.0, le=1.5)
@@ -45,6 +49,10 @@ class RunParams(BaseModel):
     chapter_review_ratio: float = Field(0.1, ge=0.0, le=0.5)
     exam_long_term_ratio: float = Field(0.05, ge=0.0, le=0.95)
     exam_working_layer_ratio: float = Field(0.90, ge=0.0, le=0.95)
+    exam_memory_mode: str = Field(
+        "full_notes",
+        description="Exam memory: full_notes | long_term | layered",
+    )
     reinforce_pool_ratio: float = Field(0.5, ge=0.1, le=0.8)
 
     crawl_max_pages: int = Field(0, ge=0, le=500)
@@ -114,11 +122,12 @@ class ParamFieldSchema(BaseModel):
     key: str
     label: str
     description: str
-    type: Literal["float", "int", "bool", "text"]
+    type: Literal["float", "int", "bool", "text", "select"]
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
+    options: Optional[List[Dict[str, str]]] = None
     group: str
     visible_when_key: Optional[str] = None
     visible_when_equals: Any = None

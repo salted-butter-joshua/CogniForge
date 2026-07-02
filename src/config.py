@@ -84,7 +84,12 @@ class Settings(BaseSettings):
     difficulty_retreat_accuracy: float = Field(
         default=0.50, alias="DIFFICULTY_RETREAT_ACCURACY"
     )
-    judge_evidence_only: bool = Field(default=True, alias="JUDGE_EVIDENCE_ONLY")
+    judge_evidence_only: bool = Field(default=False, alias="JUDGE_EVIDENCE_ONLY")
+    judge_scoring_mode: str = Field(
+        default="exam_memory",
+        alias="JUDGE_SCORING_MODE",
+        description="evidence_only | exam_memory | contradiction_only",
+    )
     judge_evidence_max_chars: int = Field(default=12000, alias="JUDGE_EVIDENCE_MAX_CHARS")
     evidence_cap_score: float = Field(default=0.88, alias="EVIDENCE_CAP_SCORE")
     judge_semantic_lenient: bool = Field(default=True, alias="JUDGE_SEMANTIC_LENIENT")
@@ -126,6 +131,11 @@ class Settings(BaseSettings):
     exam_long_term_ratio: float = Field(default=0.05, alias="EXAM_LONG_TERM_RATIO")
     exam_working_layer_ratio: float = Field(
         default=0.90, alias="EXAM_WORKING_LAYER_RATIO"
+    )
+    exam_memory_mode: str = Field(
+        default="full_notes",
+        alias="EXAM_MEMORY_MODE",
+        description="layered | full_notes | long_term",
     )
 
 

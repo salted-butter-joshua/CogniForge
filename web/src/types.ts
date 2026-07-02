@@ -21,11 +21,12 @@ export interface ParamField {
   key: string;
   label: string;
   description: string;
-  type: "float" | "int" | "bool" | "text";
+  type: "float" | "int" | "bool" | "text" | "select";
   default: unknown;
   min?: number;
   max?: number;
   step?: number;
+  options?: Array<{ value: string; label: string }>;
   group: string;
   visible_when_key?: string;
   visible_when_equals?: unknown;

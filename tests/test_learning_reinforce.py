@@ -82,6 +82,12 @@ def test_apply_evidence_cap_skipped_when_semantic_lenient():
 
 
 def test_select_exam_notes_uses_layers_not_full_working_notes():
+    import os
+
+    from src.config import get_settings
+
+    os.environ["EXAM_MEMORY_MODE"] = "layered"
+    get_settings.cache_clear()
     bundle = select_exam_notes(
         max_chars=2000,
         long_term_notes="## 已掌握\n- Etcd 是分布式 KV",
@@ -91,6 +97,7 @@ def test_select_exam_notes_uses_layers_not_full_working_notes():
     assert "长期记忆" in bundle
     assert "参考层" in bundle or "核心概念" in bundle
     assert "闭卷记忆规则" in bundle
+    get_settings.cache_clear()
 
 
 def test_format_wrong_qa_feedback():
@@ -187,7 +194,7 @@ def test_chapter_archive_and_journal():
     journal = build_learning_journal(archive, goal="学 K8s")
     assert "学习全过程笔记" in journal
     assert "知识框架" in journal
-    assert "闭卷考试时仅使用" in journal
+    assert "考试时可按参数选择" in journal
 
 
 def test_chunks_for_exam_chapter_mode_no_review():

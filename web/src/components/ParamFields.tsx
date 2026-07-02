@@ -91,6 +91,26 @@ function Field({
     );
   }
 
+  if (field.type === "select" && field.options?.length) {
+    return (
+      <div className="field">
+        <label>{field.label}</label>
+        <select
+          value={String(value ?? field.default ?? "")}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {field.options.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <div className="field-hint">{field.description}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="field">
       <label>{field.label}</label>

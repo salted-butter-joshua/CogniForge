@@ -86,9 +86,14 @@ def test_build_study_context_uses_cumulative_window():
 
 
 def test_select_exam_notes_prefers_short_term():
+    import os
+
+    from src.config import get_settings
     from src.tools.learning_policy import select_exam_notes
 
-    short = "## 核心\n" + "pod 调度单元 " * 20
+    os.environ["EXAM_MEMORY_MODE"] = "layered"
+    get_settings.cache_clear()
+    short = "## 自测要点\n" + "pod 调度单元 " * 20
     long = "## 已学\n" + "summary " * 10
     out = select_exam_notes(
         notes="",
@@ -97,8 +102,97 @@ def test_select_exam_notes_prefers_short_term():
         short_term_notes=short,
         chapter_title="Pod",
     )
-    assert "本章笔记" in out
-    assert "Pod" in out
+    assert "长期记忆" in out
+    assert "参考层" in out or "核心概念" in out
+    assert "闭卷记忆规则" in out
+    get_settings.cache_clear()
+
+
+def test_select_exam_notes_full_notes_mode():
+    import os
+
+    from src.config import get_settings
+    from src.tools.learning_policy import select_exam_notes
+
+    os.environ["EXAM_MEMORY_MODE"] = "full_notes"
+    get_settings.cache_clear()
+    notes = "## 知识框架\n" + "ServiceAccount SSA " * 30
+    archive = [
+        {
+            "chapter_id": "ch0",
+            "chapter_title": "Intro",
+            "full_notes": "## Intro\nPod 基础",
+        }
+    ]
+    out = select_exam_notes(
+        max_chars=5000,
+        short_term_notes=notes,
+        chapter_notes_archive=archive,
+        current_chapter_id="ch1",
+        chapter_title="SSA",
+    )
+    assert "完整工作笔记" in out
+    assert "Intro" in out
+    assert "ServiceAccount" in out
+    get_settings.cache_clear()
+
+
+def test_select_exam_notes_long_term_mode():
+    import os
+
+    from src.config import get_settings
+    from src.tools.learning_policy import select_exam_notes
+
+    os.environ["EXAM_MEMORY_MODE"] = "long_term"
+    get_settings.cache_clear()
+    out = select_exam_notes(
+        max_chars=4000,
+        long_term_notes="## Ch1\n- etcd 是 KV 存储",
+        short_term_notes="## Ch2\n- SSA 默认拒绝",
+        chapter_title="Ch2",
+    )
+    assert "A-MEM" in out
+    assert "etcd" in out
+    assert "SSA" in out
+    get_settings.cache_clear()
+
+
+def test_build_chapter_study_context_includes_full_material():
+    from src.tools.learning_policy import build_chapter_study_context
+
+    registry = [{"chapter_id": "ch1", "chapter_title": "Intro", "chapter_order": 0}]
+    chunks = [
+        {
+            "id": "c1",
+            "chapter_id": "ch1",
+            "chapter_title": "Intro",
+            "title": "Intro",
+            "url": "http://example.com",
+            "content": "chunk body " * 40,
+        }
+    ]
+    material = "## 整理资料\n" + "handbook paragraph " * 80
+    text = build_chapter_study_context(
+        raw_chunks=chunks,
+        chapter_registry=registry,
+        current_chapter_index=0,
+        study_material=material,
+        long_term_notes="",
+        short_term_notes="## 笔记\n已有笔记内容",
+        max_chars=20000,
+    )
+    assert "本章整理资料（完整）" in text
+    assert "handbook paragraph" in text
+    assert "已有笔记内容" in text
+    assert "长期记忆" not in text
+
+
+def test_compute_study_notes_budget_allows_revise_growth():
+    from src.tools.learning_policy import compute_study_notes_budget
+
+    notes_max, target = compute_study_notes_budget(8000, prior_chars=12000)
+    assert notes_max >= int(12000 * 1.5)
+    assert target >= 12000
 
 
 def test_build_chapter_study_context_omits_long_term():
@@ -139,6 +233,7 @@ def test_exam_notes_reallocates_when_long_term_disabled():
 
     os.environ["EXAM_LONG_TERM_RATIO"] = "0"
     os.environ["EXAM_WORKING_LAYER_RATIO"] = "0.95"
+    os.environ["EXAM_MEMORY_MODE"] = "layered"
     get_settings.cache_clear()
     out = select_exam_notes(
         notes="",
@@ -215,9 +310,39 @@ def test_ensure_question_evidence_rebinds_mismatch():
         ["chunk_1"],
         chunks,
         max_refs=1,
+        topic_tag="ServiceAccount",
+        weak_topic="SSA 身份绑定",
     )
     assert refs == ["chunk_9"]
     assert overlap > 0.05
+
+
+def test_ensure_question_evidence_rejects_namespace_for_metrics():
+    from src.tools.learning_policy import ensure_question_evidence
+
+    chunks = [
+        {
+            "id": "chunk_12",
+            "title": "Namespace",
+            "content": "命名空间用于在单集群内隔离资源。默认包含 default kube-system",
+        },
+        {
+            "id": "chunk_metrics",
+            "title": "Monitoring",
+            "content": "Kubernetes 通过 /metrics 端点暴露 Prometheus 格式指标供采集",
+        },
+    ]
+    question = "Kubernetes 的指标采集机制是通过什么端点暴露什么格式的指标？"
+    refs, overlap = ensure_question_evidence(
+        question,
+        ["chunk_12"],
+        chunks,
+        max_refs=1,
+        topic_tag="Kubernetes监控指标",
+        weak_topic="指标采集端点及格式",
+    )
+    assert refs == ["chunk_metrics"]
+    assert overlap >= 0.12
 
 
 def test_compute_study_notes_budget_extends_for_long_prior():
@@ -238,7 +363,43 @@ def test_cap_study_notes_uses_section_aware_trim():
     assert "笔记已达长度上限" in out or len(out) <= 250
 
 
-def test_study_notes_output_paths_stable():
+def test_effective_judge_scoring_mode_defaults_exam_memory():
+    import os
+
+    from src.config import get_settings
+    from src.tools.learning_policy import effective_judge_scoring_mode
+
+    os.environ.pop("JUDGE_SCORING_MODE", None)
+    os.environ["JUDGE_EVIDENCE_ONLY"] = "0"
+    get_settings.cache_clear()
+    assert effective_judge_scoring_mode() == "exam_memory"
+    get_settings.cache_clear()
+
+
+def test_build_judge_scoring_context_includes_exam_memory():
+    from src.tools.learning_policy import build_judge_scoring_context
+
+    chunks = [{"id": "c1", "title": "T", "content": "SSA 冲突检测与提示"}]
+    batch = [{"evidence_refs": ["c1"], "question": "SSA?"}]
+    ctx = build_judge_scoring_context(
+        chunks=chunks,
+        qa_batch=batch,
+        mode="exam_memory",
+        exam_memory_text="## 笔记\nHTTP 409 与 managedFields",
+        study_material="## 资料\nSSA 三特性",
+    )
+    assert "闭卷可用记忆" in ctx
+    assert "HTTP 409" in ctx
+    assert "Evidence 锚点" in ctx
+    assert "evidence 未提及" in ctx
+
+
+def test_should_apply_evidence_cap_only_in_strict_mode():
+    from src.tools.learning_policy import should_apply_evidence_cap
+
+    assert should_apply_evidence_cap("exam_memory", semantic_lenient=False) is False
+    assert should_apply_evidence_cap("evidence_only", semantic_lenient=True) is False
+    assert should_apply_evidence_cap("evidence_only", semantic_lenient=False) is True
     from pathlib import Path
 
     from src.tools.learning_policy import study_notes_output_paths

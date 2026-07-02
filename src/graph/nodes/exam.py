@@ -23,6 +23,7 @@ from src.tools.learning_policy import (
     exam_notes_char_budget,
     filter_chunks_by_ids,
     is_chapter_mastery_mode,
+    normalize_exam_memory_mode,
     normalize_topic_key,
     question_content_fingerprint,
     reinforce_pool_cap,
@@ -351,15 +352,21 @@ def _answer_questions_batch(
     long_term_notes: str = "",
     short_term_notes: str = "",
     chapter_title: str = "",
+    chapter_notes_archive: list[dict] | None = None,
+    current_chapter_id: str = "",
+    exam_memory_mode: str = "full_notes",
 ) -> list[str]:
     llm = student_exam_llm()
     q_payload = json.dumps(questions, ensure_ascii=False, indent=2)
+    mode = normalize_exam_memory_mode(exam_memory_mode)
     notes_excerpt = select_exam_notes(
         notes=study_notes,
         max_chars=notes_max_chars,
         long_term_notes=long_term_notes,
         short_term_notes=short_term_notes,
         chapter_title=chapter_title,
+        chapter_notes_archive=chapter_notes_archive,
+        current_chapter_id=current_chapter_id,
     )
 
     reinforce_tags = [
@@ -369,25 +376,50 @@ def _answer_questions_batch(
     ]
     reinforce_hint = ""
     if reinforce_tags:
+        memory_hint = (
+            "请依据可用记忆作答"
+            if mode == "full_notes"
+            else "请依据长期记忆与当前章笔记作答"
+            if mode == "long_term"
+            else "请依据长期记忆与参考层作答"
+        )
         reinforce_hint = (
             f"\n\n【巩固题提示】含上轮错题复测（考点：{', '.join(sorted(set(reinforce_tags))[:6])}）。"
-            "题目措辞可能与笔记不同，但考点相同；请依据长期记忆与参考层作答，语义正确即可。"
+            f"题目措辞可能与笔记不同，但考点相同；{memory_hint}，语义正确即可。"
         )
 
-    if closed_book:
-        prompt = f"""你是学生 A，正在进行闭卷考试。
-你只能依靠「长期记忆（内化知识）」与极少量「工作记忆参考层（术语/易错/自测摘录）」作答。
-完整手抄笔记、教材原文不在考场上可用。
-
-作答精度（与「发散」平衡）：
-- 优先准确：只写记忆材料中有的机制；**不要把机制条件写反**（例：资源冲突通常是多个管理器改「同一字段」，不是「不同字段」）
-- 对「会自动检测/提示」类问题：写清默认后果（如拒绝 apply、Conflict 错误），不确定则说「不确定」，不要编造「仅提示警告」
+    accuracy_rules = """作答精度（与「发散」平衡）：
+- 优先准确：只写记忆材料中有的机制；**不要把机制条件写反**
+- 对「会自动检测/提示」类问题：写清默认后果，不确定则说「不确定」
 - 不要为了显得完整而补充 plausible 但无依据的因果链
 - 记不清的内容请明确说「不确定」或「不知道」
 - 回答用自然语言，简洁优先；不要贴完整 YAML/大段代码
-- 英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
+- 英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）"""
 
-你的可用记忆（已按人脑分层筛选，非完整笔记）：
+    if closed_book:
+        if mode == "full_notes":
+            memory_intro = (
+                "你是学生 A，正在进行闭卷考试（可查阅完整工作笔记，不可查阅教材原文）。"
+            )
+            memory_label = "你的完整工作笔记（含已掌握章节归档 + 当前章）"
+        elif mode == "long_term":
+            memory_intro = (
+                "你是学生 A，正在进行闭卷考试（A-MEM 长期记忆 + 当前章完整笔记，不可查阅教材原文）。"
+            )
+            memory_label = "你的可用记忆（长期内化摘要 + 当前章工作笔记）"
+        else:
+            memory_intro = (
+                "你是学生 A，正在进行闭卷考试。"
+                "你只能依靠「长期记忆（内化知识）」与「工作记忆参考层（术语/易错/自测摘录）」作答。"
+                "完整手抄笔记、教材原文不在考场上可用。"
+            )
+            memory_label = "你的可用记忆（已按人脑分层筛选，非完整笔记）"
+
+        prompt = f"""{memory_intro}
+
+{accuracy_rules}{reinforce_hint}
+
+{memory_label}：
 {notes_excerpt or "（尚无可用记忆）"}
 
 题目列表：
@@ -397,9 +429,9 @@ def _answer_questions_batch(
 [{{"answer": "你的回答"}}]"""
     else:
         prompt = f"""你是学生 A。根据学习笔记作答。不知道请明确说「不知道」。
-英文术语大小写按你记住的形式书写即可（etcd/Etcd 均可）。{reinforce_hint}
+{accuracy_rules}{reinforce_hint}
 
-学习笔记（节选）：
+学习笔记：
 {notes_excerpt}
 
 题目列表：
@@ -443,10 +475,17 @@ def student_answer_batch(state: LearnLoopState) -> dict:
     settings = get_settings()
 
     chapter_title = ""
+    current_chapter_id = ""
     if is_chapter_mastery_mode():
         registry = state.get("chapter_registry") or []
         ch = current_chapter(registry, int(state.get("current_chapter_index", 0) or 0))
         chapter_title = (ch or {}).get("chapter_title", "")
+        current_chapter_id = (ch or {}).get("chapter_id", "")
+
+    archive = list(state.get("chapter_notes_archive") or [])
+    exam_memory_mode = normalize_exam_memory_mode(
+        getattr(settings, "exam_memory_mode", "full_notes")
+    )
 
     if not questions:
         logger.error(
@@ -482,6 +521,9 @@ def student_answer_batch(state: LearnLoopState) -> dict:
                 long_term_notes=long_term,
                 short_term_notes=short_term,
                 chapter_title=chapter_title,
+                chapter_notes_archive=archive,
+                current_chapter_id=current_chapter_id,
+                exam_memory_mode=exam_memory_mode,
             )
             for i, (q, a) in enumerate(zip(sub_qs, answers)):
                 global_i = start + i

@@ -163,7 +163,12 @@ RAG 检索证据（优先从不同 chunk 出题，避免全部引用同一 chunk
     "topic_tag": "主题",
     "weak_topic_focus": ""
   }}
-]"""
+]
+
+硬性要求：
+- evidence_refs 必须指向**能直接支撑本题答案**的 chunk，不得张冠李戴（例：问 /metrics 指标采集时不得引用只讲命名空间的 chunk）
+- topic_tag / weak_topic_focus 须与 evidence 内容一致
+- 若资料中找不到支撑某题的 chunk，不要出该题"""
     resp = llm.invoke(
         [
             SystemMessage(content="题目必须有 evidence_refs，且引用 ID 必须来自 RAG/资料。"),
@@ -226,18 +231,23 @@ def validate_questions(state: PersonaExamState) -> dict:
             errors.append(f"第 {i + 1} 题与前面重复")
         seen_questions.add(text)
         refs = list(q.get("evidence_refs") or [])
+        topic_tag = (q.get("topic_tag") or "").strip()
+        weak_topic = (q.get("weak_topic_focus") or "").strip()
         new_refs, overlap = ensure_question_evidence(
             text,
             refs,
             evidence_pool,
             allowed_ids=allowed or None,
+            topic_tag=topic_tag,
+            weak_topic=weak_topic,
         )
         q["evidence_refs"] = new_refs
         if not valid_evidence_refs(new_refs, evidence_pool):
             errors.append(f"第 {i + 1} 题 evidence_refs 无效且无可用 chunk")
-        elif overlap < 0.03:
+        elif overlap < 0.12:
             errors.append(
-                f"第 {i + 1} 题 evidence 与题干语义匹配过低（overlap={overlap:.2f}）"
+                f"第 {i + 1} 题 evidence 与题干/考点语义匹配过低（overlap={overlap:.2f}，"
+                f"topic={topic_tag or weak_topic or '未标注'}）"
             )
 
     passed = len(errors) == 0

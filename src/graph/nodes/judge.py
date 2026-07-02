@@ -29,14 +29,19 @@ from src.tools.learning_policy import (
     all_chapters_mastered,
     apply_evidence_cap,
     adjust_difficulty_level,
+    build_judge_scoring_context,
     chapter_exam_accuracy,
     chapter_label,
     current_chapter,
-    format_batch_evidence_context,
+    effective_judge_scoring_mode,
+    exam_notes_char_budget,
     format_evidence_context,
     is_chapter_mastery_mode,
+    judge_system_message_for_mode,
     mastery_progress_summary,
     maybe_advance_curriculum_level,
+    select_exam_notes,
+    should_apply_evidence_cap,
     update_chapter_mastery_record,
     update_reinforce_pool,
     weighted_accuracy,
@@ -64,8 +69,10 @@ def _judge_batch(
     batch: list[ExamQA],
     chunks: list[dict],
     *,
-    evidence_only: bool,
+    scoring_mode: str,
     evidence_max_chars: int,
+    exam_memory_text: str = "",
+    study_material: str = "",
 ) -> list[dict]:
 
     llm = judge_llm()
@@ -86,23 +93,24 @@ def _judge_batch(
 
     rules_text = "\n".join(f"- {r}" for r in SCORING_RULES)
 
-    if evidence_only:
+    material_section = build_judge_scoring_context(
+        chunks=chunks,
+        qa_batch=batch,
+        mode=scoring_mode,
+        exam_memory_text=exam_memory_text,
+        study_material=study_material,
+        evidence_max_chars=evidence_max_chars,
+    )
 
-        evidence_ctx = format_batch_evidence_context(
-            chunks, batch, max_chars=evidence_max_chars
-        )
+    mode_label = {
+        "evidence_only": "evidence-only",
+        "exam_memory": "exam_memory（闭卷记忆 + evidence 锚点）",
+        "contradiction_only": "contradiction-only",
+    }.get(scoring_mode, scoring_mode)
 
-        material_section = f"""每道题可引用的 evidence 原文（仅此范围，无学生笔记、无完整教材）：
+    prompt = f"""你是独立 Judge B。根据下列参考资料与评分标准给每道题打分。
 
-{evidence_ctx}"""
-
-    else:
-
-        material_section = "（未启用 evidence-only 模式）"
-
-    prompt = f"""你是独立 Judge B。根据 evidence 原文和评分标准给每道题打分。
-
-你不能看到学生的笔记或完整教材。
+当前判分模式：{mode_label}
 
 
 
@@ -152,28 +160,16 @@ def _judge_batch(
 
 score >= {CORRECT_THRESHOLD} 则 is_correct=true。
 
-评分原则（语义导向 + 机制精度）：
-- 答案与 evidence 的**中心意思一致**即可判对，不要求用词与原文一致
-- 同义改写、合理概括应给高分，但**不能把机制条件写反**（如 SSA 冲突是「同一字段」非「不同字段」）
-- 「会自动提示/检测」类表述须核对 evidence：默认是否为拒绝 apply、返回 Conflict、需 --force-conflicts 等
-- 仅当核心概念错误、机制条件错误、或与 evidence 明显矛盾时才判错
-- reason 必须写完整：指出答案中哪一句不严谨、evidence 中对应正确表述是什么
-
-评分格式与等价规则：
-- 英文大小写不敏感（如 etcd、Etcd、ETCD 视为相同术语，除非 evidence 明确区分）
-- 允许同义词、缩写与 evidence 全称等价（如 K8s / Kubernetes），前提是 evidence 支持该等价
-- 比较的是语义中心，不是字符串完全匹配"""
+评分原则：
+- 以「题目是否答对」为主，而非「答案是否仅复述 evidence 字面内容」
+- 答案与参考资料中心意思一致即可判对，不要求用词与原文一致
+- 合理扩展、同义改写、笔记/先验中的额外正确细节不应单独扣分
+- 仅当核心概念错误、机制条件写反、或与参考资料明显矛盾时才判错
+- reason 必须写完整：若扣分，指出哪一句与哪份材料矛盾或何处机制错误"""
 
     resp = llm.invoke(
         [
-            SystemMessage(
-                content=(
-                    "语义导向评分：中心意思一致即可判对，允许换词与概括。"
-                    "但对机制/因果/边界题：触发条件、作用对象、默认后果必须与 evidence 一致；"
-                    "「看似合理」的机制误述（如混淆同一字段与不同字段、把拒绝 apply 说成仅提示）应判错。"
-                    "reason 须完整写出扣分依据，便于追溯，勿截断或只写笼统评语。"
-                )
-            ),
+            SystemMessage(content=judge_system_message_for_mode(scoring_mode)),
             HumanMessage(content=prompt),
         ]
     )
@@ -200,6 +196,33 @@ def judge_score(state: LearnLoopState) -> dict:
     all_qa = list(state.get("current_batch_qa") or [])
 
     chunks = list(state.get("raw_chunks") or [])
+
+    scoring_mode = effective_judge_scoring_mode(settings)
+
+    chapter_title = ""
+    current_chapter_id = ""
+    if is_chapter_mastery_mode():
+        registry = state.get("chapter_registry") or []
+        ch = current_chapter(registry, int(state.get("current_chapter_index", 0) or 0))
+        chapter_title = (ch or {}).get("chapter_title", "")
+        current_chapter_id = (ch or {}).get("chapter_id", "")
+
+    study_notes = state.get("study_notes") or ""
+    short_term = state.get("short_term_notes") or study_notes
+    long_term = state.get("long_term_notes") or ""
+    archive = list(state.get("chapter_notes_archive") or [])
+    exam_memory = ""
+    if scoring_mode != "evidence_only":
+        exam_memory = select_exam_notes(
+            notes=study_notes,
+            max_chars=exam_notes_char_budget(),
+            long_term_notes=long_term,
+            short_term_notes=short_term,
+            chapter_title=chapter_title,
+            chapter_notes_archive=archive,
+            current_chapter_id=current_chapter_id,
+        )
+    study_material = state.get("study_material") or ""
 
     if not all_qa:
 
@@ -228,8 +251,10 @@ def judge_score(state: LearnLoopState) -> dict:
             results = _judge_batch(
                 chunk,
                 chunks,
-                evidence_only=settings.judge_evidence_only,
+                scoring_mode=scoring_mode,
                 evidence_max_chars=settings.judge_evidence_max_chars,
+                exam_memory_text=exam_memory,
+                study_material=study_material,
             )
 
             score_map = {r.get("qa_id"): r for r in results if isinstance(r, dict)}
@@ -257,7 +282,10 @@ def judge_score(state: LearnLoopState) -> dict:
                     evidence_text,
                     score,
                     cap=settings.evidence_cap_score,
-                    semantic_lenient=settings.judge_semantic_lenient,
+                    semantic_lenient=not should_apply_evidence_cap(
+                        scoring_mode,
+                        semantic_lenient=settings.judge_semantic_lenient,
+                    ),
                 )
 
                 if cap_reason:
@@ -450,10 +478,12 @@ def judge_score(state: LearnLoopState) -> dict:
                 "target_accuracy": settings.target_accuracy,
                 "chapter_mastery_accuracy": settings.chapter_mastery_accuracy,
                 "judge_semantic_lenient": settings.judge_semantic_lenient,
+                "judge_scoring_mode": effective_judge_scoring_mode(settings),
                 "judge_temperature": settings.judge_temperature,
                 "student_exam_temperature": settings.student_exam_temperature,
                 "exam_long_term_ratio": settings.exam_long_term_ratio,
                 "exam_working_layer_ratio": settings.exam_working_layer_ratio,
+                "exam_memory_mode": getattr(settings, "exam_memory_mode", "full_notes"),
                 "reinforce_pool_ratio": settings.reinforce_pool_ratio,
                 "closed_book_exam": settings.closed_book_exam,
                 "study_notes_target_ratio": settings.study_notes_target_ratio,
