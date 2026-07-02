@@ -115,6 +115,32 @@ Implementation: [`src/tools/learning_policy.py`](src/tools/learning_policy.py)
 
 Visual control plane: **URL input · parameter presets · live SSE logs · step timing · learning curves · run comparison · cooperative stop**.
 
+### Screenshots
+
+#### Runtime monitoring
+
+Track an active run end-to-end: macro round (`M014`), total elapsed time, current step, and cumulative token usage. The pipeline bar shows progress through **ingest → study → exam → judge → reinforce**, with per-step duration and token breakdown (student study, persona question generation, judge scoring, student answers, material refinement, observer analysis). The live log streams LangGraph step events with timestamps for debugging.
+
+![Runtime monitoring — pipeline, step timing, and live logs](assets/20260702182822.png)
+
+#### Token usage
+
+Inspect LLM cost per macro round: cumulative vs. per-round tokens, input/output split, average per round, and in-progress round totals before judge settlement. The bar + line chart plots round consumption against cumulative growth; the table lists input, output, and call counts for each iteration.
+
+![Token usage — per-round and cumulative statistics](assets/20260702182856.png)
+
+#### Learning curve & chapter progress
+
+See weighted judge accuracy across macro iterations against the **95% main target** and **98% chapter pass** thresholds. Chapter mastery cards show per-chapter status (mastered, in progress with attempt count, or not started) as the curriculum advances through handbook sections.
+
+![Learning curve — accuracy trend and chapter mastery](assets/20260702182920.png)
+
+#### Run comparison
+
+Overlay learning curves from multiple historical runs (including interrupted or in-progress jobs) to compare parameter presets and judge/scoring configurations. Select runs from the checklist and view accuracy trajectories on the same chart with the global target line.
+
+![Run comparison — overlay curves from historical runs](assets/20260702182953.png)
+
 ### Local development (recommended)
 
 ```bash
